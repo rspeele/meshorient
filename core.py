@@ -9,8 +9,12 @@ The "side view" is the XZ plane, looking along +Y. All units are mm.
 Pipeline:
     scan mesh -> orient -> side-view silhouette (outer contour only, windows
     filled) -> two-sided surface maps (where the scan's left and right faces
-    sit, per side-view pixel) -> thickness regions -> extras (screw holes,
-    magazine path, ...) -> SDF voxel build -> watertight STL.
+    sit, per side-view pixel) -> thickness tiers -> extras (screw holes,
+    magazine path, ...) -> either
+        sketch_model() + export_cad()  -> DXF sketches + extrusion depths,
+                                          the lossless CAD form; or
+        build_solid()                  -> SDF voxel build -> watertight STL,
+                                          a preview / printable mesh.
 
 The solid is NOT symmetric about Y=0. It is bounded by two independent face
 surfaces yL(x,z) <= y <= yR(x,z), built from a stack of thickness TIERS per
@@ -33,11 +37,14 @@ core.coverage_report() measures what the tier stack still leaves short.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import cv2
 from skimage import measure
 
-from meshio_lite import save_stl, save_dxf_polyline, watertight_report
+from meshio_lite import (save_stl, save_dxf, save_dxf_polyline, dxf_polyline,
+                         dxf_circle, watertight_report)
 
 
 # ================================================================ orient
@@ -155,7 +162,7 @@ def export_outline_dxf(sil: Silhouette, path: str):
 
 # =========================================================== surface maps
 
-SIDES = ("left", "right", "both")
+SIDES = ("left", "right")
 
 
 class ThicknessMaps:
@@ -178,12 +185,12 @@ class ThicknessMaps:
         return self.hL + self.hR
 
     def face_map(self, side):
-        """The map a region of this side is segmented against."""
+        """The map a tier on this side is segmented against."""
         if side == "left":
             return self.hL
         if side == "right":
             return self.hR
-        return self.total
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
 
     def world_extent(self):
         h, w = self.hL.shape
@@ -371,6 +378,8 @@ def make_tier(maps: ThicknessMaps, x, z, side, base_thickness, base_y0=0.0,
 
     Returns the tier dict, or None if the scan has no data at that point.
     """
+    if side not in SIDES:
+        raise ValueError(f"side must be one of {SIDES}, got {side!r}")
     s = sample_maps(maps, x, z)
     if s is None:
         return None
@@ -763,6 +772,227 @@ def build_solid(sil: Silhouette, base_thickness: float, regions, extras,
 
 def save_solid(path, verts, faces):
     save_stl(path, verts, faces)
+
+
+# ============================================================ CAD export
+#
+# The tier model IS a sketch-and-extrude model: a handful of closed outlines,
+# each extruded a known distance along Y. That exports losslessly to DXF,
+# unlike the voxel build (which is a mesh preview / print-ready STL).
+
+def _grow_loops(loops, mm, simplify_mm=0.1):
+    """Minkowski-grow closed loops by mm (rasterised; mm <= 0 is a no-op)."""
+    loops = [np.asarray(l, float) for l in loops if len(np.asarray(l)) >= 3]
+    if mm <= 0 or not loops:
+        return loops
+    px = float(np.clip(mm / 4.0, 0.02, 0.1))
+    pts = np.vstack(loops)
+    x0, z0 = pts[:, 0].min() - mm - 5 * px, pts[:, 1].min() - mm - 5 * px
+    x1, z1 = pts[:, 0].max() + mm + 5 * px, pts[:, 1].max() + mm + 5 * px
+    w = int(np.ceil((x1 - x0) / px)) + 1
+    h = int(np.ceil((z1 - z0) / px)) + 1
+    img = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(img, [np.round(np.stack([(l[:, 0] - x0) / px,
+                                          (l[:, 1] - z0) / px], 1)
+                                ).astype(np.int32) for l in loops], 255)
+    k = max(3, int(round(2 * mm / px)) | 1)
+    img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for c in cnts:
+        a = cv2.approxPolyDP(c, max(1.0, simplify_mm / px), True)
+        a = a.reshape(-1, 2).astype(np.float64)
+        if len(a) >= 3:
+            out.append(np.stack([x0 + a[:, 0] * px, z0 + a[:, 1] * px], 1))
+    return out
+
+
+def _box_loop(e, pad=0.0):
+    """The four corners of a box extra, in world XZ."""
+    cx, cz = (e["x0"] + e["x1"]) / 2, (e["z0"] + e["z1"]) / 2
+    hx = abs(e["x1"] - e["x0"]) / 2 + pad
+    hz = abs(e["z1"] - e["z0"]) / 2 + pad
+    a = np.deg2rad(e.get("tilt_deg", 0.0))
+    c, s = np.cos(a), np.sin(a)
+    p = np.array([[-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]])
+    return p @ np.array([[c, -s], [s, c]]).T + [cx, cz]
+
+
+def sketch_model(sil: Silhouette, base_thickness, regions, extras,
+                 base_y0=0.0, clearance=0.0):
+    """The solid as a list of sketches with extrusion ranges.
+
+    Each entry: {"key", "kind", "label", "loops" (world XZ), "y_lo", "y_hi"}.
+    Every tier extrudes from the same plane - y = base_y0 - so in CAD they
+    all share one workplane and differ only in depth. The base straddles it.
+    `clearance` (mm per side) is grown into the outlines and the depths, so
+    what comes out is the finished subtraction solid.
+    """
+    c = float(clearance)
+    T = float(base_thickness)
+    yR_b, yL_b = base_faces(T, base_y0)
+    model = [{"key": "00_base", "kind": "base",
+              "label": f"base tier - whole silhouette, {T:.2f} mm thick",
+              "loops": _grow_loops([np.asarray(sil.polygon, float)], c),
+              "y_lo": yL_b - c, "y_hi": yR_b + c}]
+
+    n = {"left": 0, "right": 0}
+    for t in sort_tiers(regions):
+        if region_kind(t) == "rect":
+            w = float(t["width"])
+            loops = _grow_loops([np.array([
+                [t["x0"], t["z0"]], [t["x1"], t["z0"]],
+                [t["x1"], t["z1"]], [t["x0"], t["z1"]]], float)], c)
+            model.append({"key": f"rect{len(model):02d}", "kind": "rect",
+                          "label": f"legacy rectangle, {w:.2f} mm thick",
+                          "loops": loops, "y_lo": base_y0 - w / 2 - c,
+                          "y_hi": base_y0 + w / 2 + c})
+            continue
+        if not t.get("polys"):
+            continue
+        side = t["side"]
+        n[side] += 1
+        fo = tier_offset(t, T, base_y0)
+        loops = _grow_loops([np.asarray(p, float) for p in t["polys"]], c)
+        if side == "right":
+            y_lo, y_hi = base_y0, fo + c
+        else:
+            y_lo, y_hi = -fo - c, base_y0
+        model.append({
+            "key": (f"{side[0].upper()}{n[side]}_plus"
+                    f"{t['add_mm']:.2f}mm".replace(".", "_")),
+            "kind": "tier", "side": side,
+            "label": (f"{side} tier {n[side]} - {t['add_mm']:+.2f} mm proud "
+                      f"of base, face at y={fo if side == 'right' else -fo:+.2f}"),
+            "loops": loops, "y_lo": y_lo, "y_hi": y_hi})
+
+    for i, e in enumerate(extras, 1):
+        yc = e.get("yc", 0.0)
+        if e["kind"] == "box":
+            hw = e["ywidth"] / 2 + c
+            model.append({"key": f"X{i}_box", "kind": "extra",
+                          "label": f"extra {i} - box, tilt "
+                                   f"{e.get('tilt_deg', 0.0):g} deg",
+                          "loops": [_box_loop(e, c)],
+                          "y_lo": yc - hw, "y_hi": yc + hw})
+        elif e["kind"] == "cyl_y":
+            hw = e["ylen"] / 2 + c
+            model.append({"key": f"X{i}_cyl", "kind": "extra",
+                          "label": f"extra {i} - cylinder dia {e['dia']:g} mm",
+                          "circle": (e["x"], e["z"], e["dia"] / 2 + c),
+                          "loops": [], "y_lo": yc - hw, "y_hi": yc + hw})
+    return model
+
+
+def _sketch_entities(s, layer=None):
+    ents = [dxf_polyline(loop, True, layer or s["key"]) for loop in s["loops"]]
+    if "circle" in s:
+        x, z, r = s["circle"]
+        ents.append(dxf_circle(x, z, r, layer or s["key"]))
+    return ents
+
+
+def export_cad(folder, model, meta=None):
+    """Write the sketch model as DXFs + a build sheet + an OpenSCAD assembly.
+
+    One DXF per sketch (import, place on a workplane, extrude to the depth on
+    the build sheet), plus all_sketches.dxf with one layer per sketch for a
+    single import. Returns the list of files written.
+    """
+    meta = meta or {}
+    os.makedirs(folder, exist_ok=True)
+    written = []
+    # what a previous export left here, so renamed sketches don't linger as
+    # stale DXFs. Only ever removes files this tool wrote itself.
+    stamp = os.path.join(folder, ".frame2solid_files")
+    previous = []
+    if os.path.isfile(stamp):
+        with open(stamp, encoding="utf-8") as f:
+            previous = [ln.strip() for ln in f if ln.strip()]
+
+    for s in model:
+        p = os.path.join(folder, s["key"] + ".dxf")
+        save_dxf(p, _sketch_entities(s, layer="0"))
+        written.append(p)
+
+    p = os.path.join(folder, "all_sketches.dxf")
+    save_dxf(p, [e for s in model for e in _sketch_entities(s)])
+    written.append(p)
+
+    # ---- build sheet
+    L = ["frame2solid - CAD export", "=" * 60, ""]
+    if meta.get("scan"):
+        L.append(f"scan          : {meta['scan']}")
+    L += [f"clearance     : {meta.get('clearance', 0.0):g} mm per side "
+          f"(already grown into these outlines and depths)",
+          f"base mid-plane: y0 = {meta.get('base_y0', 0.0):+.3f} mm",
+          "",
+          "Units are mm. The sketches lie in the frame's XZ plane:",
+          "    DXF x = frame X (along the bore)",
+          "    DXF y = frame Z (vertical)",
+          "and extrude along frame Y (across the frame, + = right).",
+          "",
+          "Every tier extrudes from the SAME plane, y = y0, so in CAD they",
+          "share one workplane and differ only in depth and direction.",
+          "The base straddles it. Union everything.",
+          "",
+          f"{'file':<26} {'from y':>9} {'to y':>9} {'depth':>8}  sketch",
+          "-" * 100]
+    for s in model:
+        L.append(f"{s['key'] + '.dxf':<26} {s['y_lo']:>+9.3f} "
+                 f"{s['y_hi']:>+9.3f} {s['y_hi'] - s['y_lo']:>8.3f}  "
+                 f"{s['label']}")
+    L += ["", "SolveSpace:",
+          "  1. New sketch in a workplane on the XZ plane (Y = 0 normal).",
+          "  2. File > Import... the .dxf you want (or all_sketches.dxf for",
+          "     the lot, then delete what you don't need).",
+          "  3. Tweak the outline - that's the point of exporting it.",
+          "  4. New Group > Extrude, set the depth from the table, direction",
+          "     + for right-side tiers and - for left-side ones, and offset",
+          "     the group's workplane to y0 if it isn't there already.",
+          "  5. Union the groups; export the result as STL for the boolean.",
+          "",
+          "OpenSCAD: open assembly.scad - it already does all of the above.",
+          ""]
+    p = os.path.join(folder, "build.txt")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
+    written.append(p)
+
+    # ---- OpenSCAD assembly (exact geometry, unlike the voxel STL)
+    S = ["// frame2solid - subtraction solid, rebuilt from the exported",
+         "// sketches. Exact geometry: no voxels involved.",
+         "// X = bore, Y = across the frame, Z = vertical. Units mm.",
+         "$fn = 64;", "",
+         "module sketch(file, y_lo, y_hi) {",
+         "    translate([0, y_hi, 0]) rotate([90, 0, 0])",
+         "        linear_extrude(height = y_hi - y_lo) import(file);",
+         "}", "",
+         "module frame_solid() {", "    union() {"]
+    for s in model:
+        S.append(f'        sketch("{s["key"]}.dxf", {s["y_lo"]:.4f}, '
+                 f'{s["y_hi"]:.4f});   // {s["label"]}')
+    S += ["    }", "}", "",
+          "frame_solid();", "",
+          "// The grip transplant itself - point it at your donor grip:",
+          "// difference() {",
+          '//     import("donor_grip.stl", convexity = 10);',
+          "//     frame_solid();", "// }", ""]
+    p = os.path.join(folder, "assembly.scad")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("\n".join(S))
+    written.append(p)
+
+    names = [os.path.basename(p) for p in written]
+    for old in previous:
+        if old not in names:
+            try:
+                os.remove(os.path.join(folder, old))
+            except OSError:
+                pass
+    with open(stamp, "w", encoding="utf-8") as f:
+        f.write("\n".join(names) + "\n")
+    return written
 
 
 # ------------------------------------------------------------- previews

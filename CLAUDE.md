@@ -16,12 +16,26 @@ VCarve (CNC), FDM printing for fit prototypes.
 - `app.py` — matplotlib-widget GUI (5 steps via radio buttons). matplotlib
   widgets (NOT tkinter) were chosen so the GUI is testable headless with the
   Agg backend; on Windows it runs on the default TkAgg backend.
-- `meshio_lite.py` — self-contained STL/OBJ/PLY read, binary STL + minimal
-  R12 DXF write, watertightness check. No trimesh (deliberate).
+- `meshio_lite.py` — self-contained STL/OBJ/PLY read, binary STL + R12 DXF
+  write (POLYLINE/CIRCLE, layer table, header — R12 because that is what
+  SolveSpace and OpenSCAD accept), watertightness check. No trimesh
+  (deliberate).
 - Dependencies are ONLY numpy/scipy/scikit-image/opencv-python/matplotlib
   (see requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely
   without discussing — the constraint was plain pip wheels, no mesh stack.
-- Geometry engine is a voxel signed-distance field, not mesh booleans:
+- There are TWO outputs from the same tier model, and the CAD one is the
+  primary one for the user's workflow:
+  - `sketch_model()` + `export_cad()` — the tier model IS a sketch-and-
+    extrude model, so it exports losslessly as one DXF per sketch (base
+    outline, each tier, each extra) + `all_sketches.dxf` (one layer each) +
+    `build.txt` (the extrusion table) + `assembly.scad` (OpenSCAD rebuild,
+    exact geometry, with the donor-grip `difference()` commented in). Every
+    tier extrudes from the same plane y=base_y0 so CAD needs one workplane.
+    Needs no voxel build — it works straight off step 3. `clearance` is
+    grown into the outlines (rasterised Minkowski) and the depths.
+  - the voxel build below, which is a preview + printable STL.
+- Geometry engine (for the STL) is a voxel signed-distance field, not mesh
+  booleans:
   - side-view outer silhouette (cv2 RETR_EXTERNAL) auto-fills magwell
     windows/pin holes — this is a core feature, keep it;
   - the solid is TWO-SIDED: bounded by two independent face surfaces
@@ -84,10 +98,21 @@ VCarve (CNC), FDM printing for fit prototypes.
   rows in their own axes, click-to-select via button_press_event, scroll to
   page. It quacks like a widget (.ax, set_active) so _set_step hides and
   deactivates it with everything else.
-- The step-3 side radio is the WORKING side (which map is drawn, where the
-  next click lands). It is deliberately NOT synced to the selected tier —
-  doing that silently dropped "both sides" back to one side after a
-  both-sided pick. A tier belongs to one side's stack for good.
+- Step 3 has TWO axes (self.tier_axes), one per side, instead of one map
+  with a side selector. Each renders only its own side's tiers and a click
+  lands on the side you clicked — there is no "working side" state and no
+  "both" option (the user rejected both; a tier belongs to one side for
+  good). ax_tier_L is X-inverted so it reads as the frame seen from its
+  left, not the right-hand view with the far side showing through.
+- Step 3's text boxes have NO on_submit. matplotlib fires that on focus
+  loss as well as Enter, so tabbing between boxes used to trigger a re-cut
+  each time — and there was no way to force one without leaving the box.
+  Edits commit only via App._apply_edits (the APPLY button, or Enter via
+  App._on_key). Keep it that way if you add boxes to step 3.
+- Slow operations wrap in `with self._busy(...)`: it drops a badge on the
+  figure and forces a synchronous draw+flush first, so the user sees "this
+  view is stale, a new one is coming". The stale view underneath is
+  deliberate.
 - Text boxes in step 4 still edit "the last extra" — a deliberate v1
   simplification. Step 3's tiers have a real selection model now; extras
   are the obvious next candidate for the same treatment.
@@ -101,7 +126,9 @@ VCarve (CNC), FDM printing for fit prototypes.
 - `python test_pipeline.py` — end-to-end core test with assertions (window
   filled, tier heights ±0.4 mm, tiers nest, interior holes swallowed,
   coverage clean and correctly flagging a missing tier, output watertight,
-  built faces per side within 0.35 mm incl. clearance) + pipeline_preview.png.
+  built faces per side within 0.35 mm incl. clearance, and the CAD export
+  reproducing those same faces from its sketches + DXF round-trip) +
+  pipeline_preview.png.
 - `python test_gui.py` — drives the GUI headless (Agg), screenshots each
   step, asserts tier stacking order, selection/edit/delete of any tier (not
   just the last), the asymmetric built faces, build watertight, STL
@@ -119,11 +146,15 @@ VCarve (CNC), FDM printing for fit prototypes.
 - Tier outlines are clipped to the silhouette; a tier cannot extend past the
   frame profile even after grow_mm. Use an extra for that.
 - Silhouette keeps only largest outer contour; scan junk must be pre-cropped.
+- The DXF export has NOT been verified against real SolveSpace/OpenSCAD
+  installs (neither is available here) — only against the format spec and a
+  round-trip reader in test_pipeline.py. If an importer complains, that is
+  the first place to look.
 - Possible next features: select/edit individual extras (tiers have this
   now), extras along arbitrary axes, an "extend beyond silhouette" helper
   for where the frame exits the grip, per-extra clearance opt-out, a
-  coverage heat-map overlay in step 3, OpenSCAD difference-script generator
-  for the final grip boolean.
+  coverage heat-map overlay in step 3, arcs/splines in the DXF instead of
+  dense polylines (fewer points to drag around in SolveSpace).
 - The user's broader workflow is documented in grip-transplant-workflow.md
   (may be in a parent folder): scan → this tool → registration in MeshMixer →
   boolean (Blender 4.5 Manifold solver or OpenSCAD+Manifold) → wall-thickness

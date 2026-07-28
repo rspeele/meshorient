@@ -1,4 +1,6 @@
 """Headless end-to-end test of the frame2solid core pipeline."""
+import os
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -6,6 +8,27 @@ import matplotlib.pyplot as plt
 
 from meshio_lite import load_mesh
 import core
+
+
+def read_dxf_polylines(path):
+    """Minimal DXF reader — enough to prove what we wrote is readable."""
+    with open(path) as fh:
+        tok = [t.strip() for t in fh]
+    pairs = list(zip(tok[0::2], tok[1::2]))
+    loops, cur, in_poly = [], None, False
+    for i, (code, val) in enumerate(pairs):
+        if code == "0":
+            if val == "POLYLINE":
+                cur, in_poly = [], True
+            elif val == "SEQEND" and in_poly:
+                loops.append(np.asarray(cur, float))
+                cur, in_poly = None, False
+            elif val == "VERTEX":
+                cur.append([None, None])
+        elif in_poly and cur and code in ("10", "20") and \
+                pairs[i - 1][1] != "POLYLINE":
+            cur[-1][0 if code == "10" else 1] = float(val)
+    return loops
 
 # ---- load synthetic scan
 verts, faces = load_mesh("synthetic_frame_scan.stl")
@@ -140,6 +163,75 @@ for name, box, exp_l, exp_r in [
 
 core.save_solid("frame_solid.stl", bverts, bfaces)
 print("saved frame_solid.stl")
+
+# ---- CAD export: the same model as sketches + extrusion depths
+model = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+                          clearance=CLEAR)
+assert len(model) == 1 + len(tiers) + len(extras)
+print("sketch model:")
+for s in model:
+    print(f"  {s['key']:<24} y {s['y_lo']:+7.2f} .. {s['y_hi']:+7.2f}  "
+          f"{len(s['loops'])} loop(s)  {s['label']}")
+
+# every tier extrudes off the same plane, and clearance is grown in
+for s in model:
+    if s["kind"] == "tier":
+        assert base_y0 in (s["y_lo"], s["y_hi"]), "tiers share one workplane"
+by_key = {s["key"]: s for s in model}
+base_sk = by_key["00_base"]
+assert abs((base_sk["y_hi"] - base_sk["y_lo"]) - (base + 2 * CLEAR)) < 1e-6
+# right tier 3 is the boss: its outer face must be the scan's, plus clearance
+boss_sk = [s for s in model if s["key"].startswith("R3")][0]
+assert abs(boss_sk["y_hi"] - (14.0 + CLEAR)) < 0.4, boss_sk["y_hi"]
+# the clearance-grown outline must enclose the nominal one
+nominal = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+                            clearance=0.0)
+n_boss = [s for s in nominal if s["key"].startswith("R3")][0]
+poly_g = _Path(boss_sk["loops"][0])
+assert all(poly_g.contains_point(p) for p in n_boss["loops"][0]), \
+    "clearance must grow the outline outward"
+
+
+# the exported sketches must describe the SAME solid as the voxel build
+def cad_faces_at(model, x, z):
+    """Y range of the union of the extruded sketches at a point."""
+    lo, hi = np.inf, -np.inf
+    for s in model:
+        inside = any(_Path(l).contains_point((x, z)) for l in s["loops"])
+        if not inside and "circle" in s:
+            cx, cz, r = s["circle"]
+            inside = np.hypot(x - cx, z - cz) <= r
+        if inside:
+            lo, hi = min(lo, s["y_lo"]), max(hi, s["y_hi"])
+    return lo, hi
+
+
+for name, (x, z), exp_l, exp_r in [("rail", (0, 40), -13.0, 13.0),
+                                   ("grip", (30, -30), -11.0, 11.0),
+                                   ("tang", (-70, 10), -6.0, 6.0),
+                                   ("boss", (0, 4), -11.0, 14.0)]:
+    lo, hi = cad_faces_at(model, x, z)
+    print(f"CAD {name}: y {lo:+.2f} .. {hi:+.2f}  "
+          f"(expect {exp_l - CLEAR:+.2f} .. {exp_r + CLEAR:+.2f})")
+    assert abs(lo - (exp_l - CLEAR)) < 0.35, name
+    assert abs(hi - (exp_r + CLEAR)) < 0.35, name
+
+files = core.export_cad("frame_solid_cad", model, meta={
+    "scan": "synthetic_frame_scan.stl", "clearance": CLEAR,
+    "base_y0": base_y0})
+print(f"wrote {len(files)} CAD files to frame_solid_cad/")
+assert all(os.path.isfile(f) for f in files)
+
+# the DXFs must read back as the same closed loops
+for s in model:
+    if not s["loops"]:
+        continue
+    loops = read_dxf_polylines(os.path.join("frame_solid_cad",
+                                            s["key"] + ".dxf"))
+    assert len(loops) == len(s["loops"]), s["key"]
+    for a, b in zip(loops, s["loops"]):
+        assert np.allclose(a, b, atol=1e-3), s["key"]
+print("DXF round-trip OK")
 
 # ---- preview images -------------------------------------------------
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))

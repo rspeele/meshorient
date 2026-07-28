@@ -213,15 +213,97 @@ def save_stl(path, verts, faces):
         rec.tofile(f)
 
 
-def save_dxf_polyline(path, points_xy, closed=True):
-    """Write a minimal R12 DXF containing one POLYLINE from Nx2 points."""
-    lines = ["0", "SECTION", "2", "ENTITIES", "0", "POLYLINE", "8", "0",
-             "66", "1", "70", "1" if closed else "0"]
-    for x, y in points_xy:
-        lines += ["0", "VERTEX", "8", "0", "10", f"{x:.4f}", "20", f"{y:.4f}"]
-    lines += ["0", "SEQEND", "0", "ENDSEC", "0", "EOF"]
+_DXF_LAYER_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$-")
+
+
+def dxf_layer_name(name):
+    """R12 layer names: upper case, no dots/spaces, 31 chars max."""
+    s = "".join(c if c in _DXF_LAYER_OK else "_" for c in str(name).upper())
+    return s[:31] or "0"
+
+
+def dxf_polyline(points_xy, closed=True, layer="0"):
+    """A closed POLYLINE entity for save_dxf()."""
+    return {"type": "polyline", "points": points_xy, "closed": closed,
+            "layer": layer}
+
+
+def dxf_circle(x, y, r, layer="0"):
+    """A CIRCLE entity for save_dxf()."""
+    return {"type": "circle", "center": (x, y), "r": r, "layer": layer}
+
+
+def save_dxf(path, entities):
+    """Write an AC1009 (R12) DXF.
+
+    R12 POLYLINE/VERTEX rather than LWPOLYLINE, because R12 is what every
+    CAD importer accepts — SolveSpace and OpenSCAD included. Layers used by
+    the entities are declared in the TABLES section; importers that ignore
+    layers still get every entity.
+    """
+    entities = [dict(e, layer=dxf_layer_name(e.get("layer", "0")))
+                for e in entities]
+    xs, ys = [], []
+    for e in entities:
+        if e["type"] == "polyline":
+            p = np.asarray(e["points"], float)
+            xs += [p[:, 0].min(), p[:, 0].max()]
+            ys += [p[:, 1].min(), p[:, 1].max()]
+        else:
+            cx, cy = e["center"]
+            xs += [cx - e["r"], cx + e["r"]]
+            ys += [cy - e["r"], cy + e["r"]]
+    lo = (min(xs) if xs else 0.0, min(ys) if ys else 0.0)
+    hi = (max(xs) if xs else 0.0, max(ys) if ys else 0.0)
+
+    out = ["0", "SECTION", "2", "HEADER",
+           "9", "$ACADVER", "1", "AC1009",
+           "9", "$INSUNITS", "70", "4",                   # 4 = millimetres
+           "9", "$EXTMIN", "10", f"{lo[0]:.6f}", "20", f"{lo[1]:.6f}",
+           "30", "0.0",
+           "9", "$EXTMAX", "10", f"{hi[0]:.6f}", "20", f"{hi[1]:.6f}",
+           "30", "0.0",
+           "0", "ENDSEC"]
+
+    layers = []
+    for e in entities:
+        if e.get("layer", "0") not in layers:
+            layers.append(e.get("layer", "0"))
+    if "0" not in layers:
+        layers.append("0")
+    out += ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER",
+            "70", str(len(layers))]
+    for i, name in enumerate(layers):
+        out += ["0", "LAYER", "2", name, "70", "0",
+                "62", str(1 + i % 7), "6", "CONTINUOUS"]
+    out += ["0", "ENDTAB", "0", "ENDSEC"]
+
+    out += ["0", "SECTION", "2", "ENTITIES"]
+    for e in entities:
+        layer = e.get("layer", "0")
+        if e["type"] == "polyline":
+            pts = np.asarray(e["points"], float)
+            out += ["0", "POLYLINE", "8", layer, "66", "1",
+                    "10", "0.0", "20", "0.0", "30", "0.0",
+                    "70", "1" if e.get("closed", True) else "0"]
+            for x, y in pts:
+                out += ["0", "VERTEX", "8", layer,
+                        "10", f"{x:.4f}", "20", f"{y:.4f}", "30", "0.0"]
+            out += ["0", "SEQEND", "8", layer]
+        elif e["type"] == "circle":
+            cx, cy = e["center"]
+            out += ["0", "CIRCLE", "8", layer, "10", f"{cx:.4f}",
+                    "20", f"{cy:.4f}", "30", "0.0", "40", f"{e['r']:.4f}"]
+        else:
+            raise ValueError(f"Unknown DXF entity: {e['type']}")
+    out += ["0", "ENDSEC", "0", "EOF"]
     with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write("\n".join(out) + "\n")
+
+
+def save_dxf_polyline(path, points_xy, closed=True):
+    """Write a DXF containing one closed polyline."""
+    save_dxf(path, [dxf_polyline(points_xy, closed)])
 
 
 # ---------------------------------------------------------------- checks

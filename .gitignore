@@ -22,6 +22,9 @@ gui_frame_solid.stl
 outline.dxf
 test_project.json
 
+# --- CAD export folders (Export CAD writes <out>_cad/) ---
+*_cad/
+
 # --- User work files ---
 # Scans in, solids out: mesh files are big binaries and belong to a project,
 # not to the repo. The synthetic test scan is the one exception (it is the

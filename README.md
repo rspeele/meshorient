@@ -51,27 +51,34 @@ SolveSpace if you'd rather rebuild in CAD.
 
 **3 · Tiers.** The real frame's bumpy, continuously varying thickness gets
 simplified into a handful of flat **thickness tiers per side** — typically
-3–5. The heatmap shows where the scan's surface sits on the side you're
-working on (left / right / total, set by the radio), so bosses and reliefs
-stand out.
+3–5. You get **two views, one per side**: each shows where that side's
+surface sits (so bosses and reliefs stand out) and only that side's tiers.
+The left view is mirrored, so it's the frame as seen standing on its left —
+not the right-hand view with the far side showing through.
 
 - **Pick base**, then click the *thinnest* part of the frame (usually the
   magazine housing). That's the base tier: the whole silhouette, extruded to
   that thickness. `y0` is the mid-plane it's centred on, measured at your
   click — this matters, because an asymmetric frame's true mid-plane is not
   where step 1's bounding-box centring put it.
-- Then **click each thicker feature**. A tier's outline is *everything on
-  that side standing proud of the tier below it*, anywhere on the frame — so
-  one click on the frame body ropes in every trigger-bar relief, spring
-  channel and boss above the base at once, and extrudes them all to the
-  thickness you clicked. Click a fatter area for the next tier up, and so on.
+- Then **click each thicker feature, in whichever view's side it's on**. A
+  tier's outline is *everything on that side standing proud of the tier
+  below it*, anywhere on the frame — so one click on the frame body ropes in
+  every trigger-bar relief, spring channel and boss above the base at once,
+  and extrudes them all to the thickness you clicked. Click a fatter area
+  for the next tier up, and so on.
 - `+mm` is how far proud of the base that tier stands (prefilled from the
   scan, override with calipers — the outline doesn't move when you do).
   `over` is how much proud of the tier below a feature must be to get roped
   in: a noise margin, 0.3 mm suits most scanners. `grow` Minkowski-grows the
   outline for parts that have to *move* — a trigger bar needs room fore, aft
   and up, not just clearance on its face.
-- Every tier is listed at the right; click a row (or right-click the map) to
+- Edits to those boxes (and to `base T` / `y0`) commit when you press
+  **APPLY** or Enter, and never before — so you can tab between boxes
+  without paying for a re-cut each time, and you can force one without
+  having to click somewhere else. A badge says `applying…` while it works;
+  what's on screen until it clears is the old view.
+- Every tier is listed at the right; click a row (or right-click a view) to
   select one and edit or delete it. Tiers keep themselves in stacking order.
 - The status line reports what the stack still leaves **under-thick**, with
   the worst spot's coordinates. Zero means the tiers cover the whole scan;
@@ -91,9 +98,26 @@ The text boxes edit the **last** extra added. Everything here gets unioned
 with the frame before subtraction, so nothing you build later can block a
 magazine or bury a screw.
 
-**5 · Build.** Voxel signed-distance-field build: outline extruded to the
-tier stack on each side, extras unioned, everything dilated by `clearance`,
-then meshed.
+**5 · Build & export.** Two ways out, from the same tier model:
+
+**Export CAD (DXF)** is the one to reach for. The tier model *is* a
+sketch-and-extrude model, so it exports losslessly: one DXF per sketch (base
+outline, each tier, each extra) into `<out>_cad/`, plus `all_sketches.dxf`
+with one layer per sketch if you'd rather import once. `build.txt` is the
+build sheet — the exact Y range and depth for every sketch. Every tier
+extrudes from the *same* plane (`y0`), so in SolveSpace they share one
+workplane and differ only in depth and direction. Import, tweak the outlines
+by hand — which is the point — extrude, union. `assembly.scad` does the whole
+thing already if you'd rather drive it from OpenSCAD, and includes the
+`difference()` against your donor grip, commented out. The `clearance` value
+is grown into the outlines and depths; set it to 0 for nominal geometry.
+This needs no build — it works straight off step 3.
+
+**BUILD solid** is the voxel signed-distance-field path: outline extruded to
+the tier stack on each side, extras unioned, everything dilated by
+`clearance`, then meshed. Use it as a preview (the section slider) and for a
+quick printable STL; it can't produce a broken boolean, but it's a mesh, not
+CAD.
 This engine cannot produce a broken boolean — the output is checked and
 reported watertight. Inspect side- and cross-sections with the slider, then
 Save STL. Voxel 0.3 mm is a good preview; 0.15–0.2 mm for the final (watch the
@@ -105,16 +129,18 @@ a JSON you can reload later or start from for the next scan of the same frame:
 
 ## Using the output
 
-Subtract `frame_solid.stl` from your donor grip mesh:
+**Via CAD (preferred).** Take `<out>_cad/` into SolveSpace, adjust the
+outlines where the scan was ropey, extrude per `build.txt`, and you have a
+real parametric model you can revise later. Or open `assembly.scad` in
+OpenSCAD (Manifold backend), uncomment the `difference()` at the bottom and
+point it at your donor grip — exact geometry, no voxels, seconds to run.
+
+**Via mesh.** Subtract `frame_solid.stl` from your donor grip mesh:
 
 - **Blender 4.5+**: Boolean modifier, Difference, solver "Manifold" (both
   meshes watertight — this tool guarantees its half).
-- **OpenSCAD** (current release, Manifold backend): a 3-line
-  `difference() { import(...); import(...); }` script makes the recipe
-  repeatable per grip.
 - MeshMixer's boolean will usually cope too, since the hard part (a clean
-  subtraction solid) is already done — but the two above are faster and
-  stricter.
+  subtraction solid) is already done — but Blender is faster and stricter.
 
 Clearance guidance: the `clearance` parameter is per-side. ~0.10–0.20 mm for
 FDM prints, ~0.05–0.10 mm for CNC hardwood plus finish allowance. Print a

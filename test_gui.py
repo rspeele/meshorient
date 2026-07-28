@@ -1,4 +1,6 @@
 """Headless GUI test: drive the app programmatically, screenshot each step."""
+import os
+
 import matplotlib
 matplotlib.use("Agg")
 
@@ -7,9 +9,14 @@ import app as appmod
 import core
 from meshio_lite import load_mesh, watertight_report
 
-SIDE = {s: appmod.SIDE_LABELS[i] for i, s in enumerate(appmod.SIDE_KEYS)}
-
 a = appmod.App()
+
+
+class FakeClick:
+    """A matplotlib button_press_event, near enough to drive the app."""
+
+    def __init__(self, ax, x, y, button=1):
+        self.inaxes, self.xdata, self.ydata, self.button = ax, x, y, button
 
 # --- step 1: load + orient
 a.tb_path.set_val("synthetic_frame_scan.stl")
@@ -50,15 +57,18 @@ print("picked base:", a.base_thickness, "y0:", a.base_y0)
 assert abs(a.base_thickness - 12) < 0.5
 assert abs(a.base_y0 + 0.5) < 0.2, "mid-plane offset should be about -0.5 mm"
 
-# tiers: grip walls and rail on both sides, then the right-only boss
+# tiers: one view per side, and a click lands in whichever view you clicked
 a.tb_over.set_val("0.3")
 a.tb_grow.set_val("0")
-a._on_side(SIDE["both"])
-a.add_region(25, Z(-30))          # grip walls  -> +5 mm each side
-a.add_region(0, Z(40))            # rail        -> +7 mm each side
-a._on_side(SIDE["right"])
-a.add_region(5, Z(4))             # trigger-bar boss -> +8 mm, right only
-assert len(a.regions) == 5, "both-sided picks add one tier per side"
+for side in ("left", "right"):
+    a._on_click(FakeClick(a.tier_axes[side], 25, Z(-30)))   # grip walls, +5
+    a._on_click(FakeClick(a.tier_axes[side], 0, Z(40)))     # rail,       +7
+a._on_click(FakeClick(a.tier_axes["right"], 5, Z(4)))       # boss, right only
+assert len(a.regions) == 5
+assert [t["side"] for t in a.regions].count("right") == 3
+# a click in the left view can only ever make a left tier
+assert all(t["side"] == "left" for t in a.regions
+           if abs(t["x"] - 25) < 1 and t["side"] == "left")
 for t in a.regions:
     assert t["polys"], f"tier {t} came out empty"
 print("tiers:", [(t["side"], t["add_mm"], t["area_mm2"]) for t in a.regions])
@@ -79,31 +89,64 @@ print("coverage:", cov)
 assert max(cov[s]["short_mm"] for s in ("left", "right")) < 0.4
 assert "cover the whole scan" in a._coverage_note()
 
+# each view draws only its own side's tiers
+a._draw()
+for side, ax in a.tier_axes.items():
+    drawn = [t.get_text() for t in ax.texts if "+" in t.get_text()]
+    want = sum(1 for t in a.regions if t["side"] == side)
+    assert len(drawn) == want, (side, drawn)
+    assert all(appmod.SIDE_TAG[side].strip() in d for d in drawn), (side, drawn)
+# the left view is mirrored — it is the frame seen from its left
+lo, hi = a.tier_axes["left"].get_xlim()
+assert lo > hi, "left view should have X inverted"
+assert a.tier_axes["right"].get_xlim()[0] < a.tier_axes["right"].get_xlim()[1]
+
 # selection: any tier, not just the last one
 a._select(0)
 assert a.sel == 0 and a.tb_add.text == f"{a.regions[0]['add_mm']:g}"
 a._step_sel(+1)
 assert a.sel == 1
-# right-clicking the map selects the tallest tier under the cursor
-assert a._region_at(5, Z(4)) == 4, "the boss tier should win over the rail"
-assert a._region_at(-70, Z(10)) is None, "the tang is base, not a tier"
+# right-clicking a view selects the tallest tier there — and only that side's
+assert a._region_at(5, Z(4), "right") == 4, "boss tier should win over rail"
+assert a._region_at(5, Z(4), "left") == 0, "left view sees only left tiers"
+assert a._region_at(-70, Z(10), "right") is None, "the tang is base, not a tier"
 # clicking a list row selects too
 a.lst.on_select(4)
 assert a.sel == 4
 
-# editing the selected tier re-cuts it in place
+# editing is explicit: typing alone changes nothing until Apply
 before = a.regions[4]["area_mm2"]
 a.tb_grow.set_val("2")
-a._on_region_edit("2")
+assert a.regions[4]["area_mm2"] == before, "no re-cut before Apply"
+a._apply_edits()
 assert a.regions[4]["area_mm2"] > before, "grow_mm must dilate the outline"
 a.tb_grow.set_val("0")
-a._on_region_edit("0")
+a._apply_edits()
 a.tb_add.set_val("8.4")            # caliper override; outline must not move
 area = a.regions[4]["area_mm2"]
-a._on_region_edit("8.4")
+a._apply_edits()
 assert a.regions[4]["add_mm"] == 8.4
 assert abs(a.regions[4]["area_mm2"] - area) < 1e-9
-a.tb_add.set_val("8"); a._on_region_edit("8")
+# Enter applies too, and applying twice is a no-op
+a.tb_add.set_val("8")
+a._on_key(type("E", (), {"key": "enter"})())
+assert a.regions[4]["add_mm"] == 8.0
+a._apply_edits()
+assert "Nothing to apply" in a.txt_status.get_text()
+# the busy badge is up *while* the re-cut runs, and gone afterwards
+assert not a.txt_busy.get_visible()
+seen = {}
+_orig_segment_all = core.segment_all
+core.segment_all = lambda *args, **kw: (
+    seen.update(up=a.txt_busy.get_visible(), text=a.txt_busy.get_text()),
+    _orig_segment_all(*args, **kw))[1]
+a.tb_grow.set_val("1")
+a._apply_edits()
+core.segment_all = _orig_segment_all
+assert seen["up"] and "applying" in seen["text"], seen
+assert not a.txt_busy.get_visible()
+a.tb_grow.set_val("0")
+a._apply_edits()
 
 # deleting a middle tier re-cuts the one above it (its threshold drops)
 a._select(3)                        # right rail tier
@@ -115,8 +158,16 @@ boss = a.regions[-1]
 assert boss["side"] == "right" and abs(boss["add_mm"] - 8.0) < 0.4
 assert boss["threshold_mm"] < boss_thr, "boss should now cut from the tier below"
 assert abs(boss["threshold_mm"] - rail_thr) < 1e-6
-a.add_region(0, Z(40), side="right")   # put the rail tier back
+a._on_click(FakeClick(a.tier_axes["right"], 0, Z(40)))   # put the rail back
 assert len(a.regions) == 5
+
+# base thickness / y0 also wait for Apply
+a.tb_base.set_val("12.5")
+assert a.base_thickness != 12.5
+a._apply_edits()
+assert a.base_thickness == 12.5
+a.tb_base.set_val(f"{12.09:g}")
+a._apply_edits()
 a.fig.savefig("gui_step3_regions.png", dpi=100)
 
 # --- step 4: extras
@@ -128,10 +179,24 @@ a.add_extra_cyl(55, zmax - 75)
 assert a.extras[-1]["yc"] == 0.0
 a.fig.savefig("gui_step4_extras.png", dpi=100)
 
-# --- step 5: build + save
+# --- step 5: CAD export (must not need a voxel build first)
 a._set_step(4)
 a.tb_vox.set_val("0.35")
 a.tb_clr.set_val("0.15")
+a.tb_out.set_val("gui_frame_solid.stl")
+assert a.result is None
+a._on_export_cad(None)
+cad = "gui_frame_solid_cad"
+assert os.path.isdir(cad)
+want = ["00_base.dxf", "all_sketches.dxf", "build.txt", "assembly.scad"]
+assert all(os.path.isfile(os.path.join(cad, f) )for f in want), os.listdir(cad)
+dxfs = [f for f in os.listdir(cad) if f.endswith(".dxf")]
+assert len(dxfs) == 1 + 5 + 2 + 1, dxfs      # base + tiers + extras + combined
+sheet = open(os.path.join(cad, "build.txt"), encoding="utf-8").read()
+assert "R3_plus" in sheet and "clearance     : 0.15" in sheet
+print("CAD export OK:", sorted(os.listdir(cad)))
+
+# --- step 5: build + save
 a._on_build(None)
 assert a.result is not None
 bverts, _, rep, _ = a.result
@@ -154,7 +219,6 @@ a.fig.savefig("gui_step5_build.png", dpi=100)
 a.sl_sec.set_val(0.4)
 a.fig.savefig("gui_step5_build_section.png", dpi=100)
 
-a.tb_out.set_val("gui_frame_solid.stl")
 a._on_save(None)
 
 # verify saved STL round-trips watertight
