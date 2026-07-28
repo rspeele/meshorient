@@ -9,13 +9,18 @@ Steps (radio buttons, top right):
                   Z = vertical. Views show the three projections.
   2 Silhouette  — extract the side-view OUTER outline. Windows and holes are
                   filled automatically. Export DXF for CAD tracing if wanted.
-  3 Regions     — thickness heatmap from the scan. Drag rectangles to assign
-                  plateau widths (suggested from measurement; override in the
-                  width box, which edits the LAST region). Base width applies
-                  everywhere else.
+  3 Tiers       — two-sided thickness tiers. "Pick base" + a click on the
+                  THINNEST part sets the base tier (the whole silhouette).
+                  Every further click adds a tier on the chosen side: its
+                  outline is everything standing proud of the tier below it
+                  (anywhere on the frame), extruded out to the clicked
+                  thickness. 3-5 tiers per side is typical. Tiers are listed
+                  at the right: click a row (or right-click the map) to
+                  select one and edit its height / noise margin / growth.
   4 Extras      — add clearance solids: drag = tilted box (mag path, levers),
                   click = Y-cylinder (grip screws, pins). Dims via text boxes
-                  (they edit the LAST extra).
+                  (they edit the LAST extra); y-mid offsets it off the
+                  centreline for one-sided reliefs.
   5 Build       — voxel SDF build -> watertight STL. Inspect cross-sections
                   with the slider before saving.
 """
@@ -28,6 +33,7 @@ import sys
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib.path import Path as MplPath
 from matplotlib.widgets import (Button, TextBox, RadioButtons,
                                 RectangleSelector, Slider)
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
@@ -35,7 +41,104 @@ from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 import core
 from meshio_lite import load_mesh, save_stl
 
-STEPS = ["1 Load/Orient", "2 Silhouette", "3 Regions", "4 Extras", "5 Build"]
+STEPS = ["1 Load/Orient", "2 Silhouette", "3 Tiers", "4 Extras", "5 Build"]
+SIDE_LABELS = ["left (-Y)", "right (+Y)", "both sides"]
+SIDE_KEYS = ["left", "right", "both"]
+SIDE_TAG = {"left": "L ", "right": " R", "both": "LR"}
+
+
+class ListBox:
+    """Minimal clickable list for matplotlib (no tkinter, testable headless).
+
+    Rows are drawn top-down in their own axes; a click selects a row and
+    calls on_select(index). Hidden/disabled like the other step widgets via
+    .ax and set_active().
+    """
+
+    ROWS = 11
+
+    def __init__(self, fig, rect, on_select, title=""):
+        self.ax = fig.add_axes(rect)
+        self.ax.set_navigate(False)
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
+        for sp in self.ax.spines.values():
+            sp.set_color("0.75")
+        self.on_select = on_select
+        self.title = title
+        self.items = []
+        self.sel = None
+        self.top = 0
+        self.active = True
+        self._rh = 1.0 / (self.ROWS + 1)
+        fig.canvas.mpl_connect("button_press_event", self._on_click)
+        fig.canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.draw()
+
+    # matplotlib-widget-compatible enable/disable
+    def set_active(self, flag):
+        self.active = bool(flag)
+
+    def set_items(self, items, sel=None):
+        self.items = list(items)
+        self.sel = sel
+        if sel is not None:
+            if sel < self.top:
+                self.top = sel
+            elif sel >= self.top + self.ROWS:
+                self.top = sel - self.ROWS + 1
+        self.top = max(0, min(self.top, max(0, len(self.items) - self.ROWS)))
+        self.draw()
+
+    def draw(self):
+        ax = self.ax
+        ax.clear()
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
+        rh = self._rh
+        ax.text(0.015, 1 - rh * 0.5, self.title, fontsize=8, weight="bold",
+                va="center", color="0.25")
+        if not self.items:
+            ax.text(0.015, 1 - rh * 1.6, "(none yet)", fontsize=8,
+                    color="0.55", va="center", family="monospace")
+        for i, txt in enumerate(self.items[self.top:self.top + self.ROWS]):
+            idx = self.top + i
+            y = 1 - rh * (i + 1.5)
+            if idx == self.sel:
+                ax.add_patch(plt.Rectangle((0, y - rh * 0.5), 1, rh,
+                                           color="#ffe08a", zorder=0))
+            ax.text(0.015, y, txt, fontsize=8, family="monospace",
+                    va="center", zorder=1)
+        n_hidden = len(self.items) - self.top - self.ROWS
+        if n_hidden > 0:
+            ax.text(0.985, rh * 0.5, f"+{n_hidden} more (scroll)", fontsize=7,
+                    color="0.55", va="center", ha="right")
+
+    def _row_at(self, event):
+        if not self.active or not self.ax.get_visible():
+            return None
+        if event.inaxes is not self.ax or event.ydata is None:
+            return None
+        row = int((1.0 - event.ydata) / self._rh) - 1
+        if row < 0:
+            return None
+        idx = self.top + row
+        return idx if 0 <= idx < len(self.items) else None
+
+    def _on_click(self, event):
+        idx = self._row_at(event)
+        if idx is not None:
+            self.on_select(idx)
+
+    def _on_scroll(self, event):
+        if not self.active or not self.ax.get_visible():
+            return
+        if event.inaxes is not self.ax:
+            return
+        self.top = max(0, min(self.top - int(event.step),
+                              max(0, len(self.items) - self.ROWS)))
+        self.draw()
+        self.ax.figure.canvas.draw_idle()
 
 
 def _try_filedialog(save=False, initial=""):
@@ -67,14 +170,19 @@ class App:
         self.offset = np.zeros(3)     # translation applied after M
         self.verts = None             # oriented verts (cache)
         self.sil = None               # core.Silhouette
-        self.wmap = None              # (wmap, x0, z0, px)
-        self.base_width = None
+        self.maps = None              # core.ThicknessMaps (two-sided)
+        self.base_thickness = None
+        self.base_y0 = 0.0            # mid-plane of the base slab
         self.regions = []
+        self.sel = None               # index of the selected region
+        self.cur_side = "both"        # side for the next region added
         self.extras = []
         self.result = None            # (verts, faces, report, sdf_pack)
         self.step = 0
         self.extra_kind = "box (drag)"
         self._radio_guard = False
+        self._sync = False            # suppress widget callbacks while syncing
+        self._pick_base_armed = False
 
         # ---------- axes
         self.ax_main = self.fig.add_axes([0.05, 0.16, 0.58, 0.76])
@@ -158,20 +266,57 @@ class App:
         self._wy = 0.745
         # ---------- step 3 widgets
         self.w3 = []
-        r = slot(split=(0.67, 0.13))
-        self.tb_base = TextBox(self.fig.add_axes(r), "base w ", initial="")
-        self.tb_base.on_submit(self._on_base_w)
-        self.tb_rw = TextBox(self.fig.add_axes([0.87, r[1], 0.10, r[3]]),
-                             "last w ", initial="")
-        self.tb_rw.on_submit(self._on_region_w)
-        self.w3 += [self.tb_base, self.tb_rw]
-        r = slot(split=(0.67, 0.145))
-        self.bt_rdel = Button(self.fig.add_axes(r), "Delete last region")
+        r = slot(split=(0.715, 0.055))
+        self.tb_base = TextBox(self.fig.add_axes(r), "base T ", initial="")
+        self.tb_base.on_submit(self._on_base_t)
+        self.tb_y0 = TextBox(self.fig.add_axes([0.805, r[1], 0.045, r[3]]),
+                             "y0 ", initial="0")
+        self.tb_y0.on_submit(self._on_base_t)
+        self.bt_pickbase = Button(self.fig.add_axes([0.865, r[1], 0.115, r[3]]),
+                                  "Pick base")
+        self.bt_pickbase.on_clicked(self._on_pick_base)
+        self.w3 += [self.tb_base, self.tb_y0, self.bt_pickbase]
+
+        r = slot(split=(0.715, 0.055))
+        self.tb_add = TextBox(self.fig.add_axes(r), "+mm ", initial="")
+        self.tb_over = TextBox(self.fig.add_axes([0.825, r[1], 0.045, r[3]]),
+                               "over ", initial="0.3")
+        self.tb_grow = TextBox(self.fig.add_axes([0.925, r[1], 0.055, r[3]]),
+                               "grow ", initial="0")
+        for tb in (self.tb_add, self.tb_over, self.tb_grow):
+            tb.on_submit(self._on_region_edit)
+        self.w3 += [self.tb_add, self.tb_over, self.tb_grow]
+
+        r = slot(h=0.075)
+        self.radio_side = RadioButtons(
+            self.fig.add_axes([0.67, r[1], 0.145, 0.075]), SIDE_LABELS,
+            active=SIDE_KEYS.index("both"))
+        self.radio_side.on_clicked(self._on_side)
+        self.bt_prev = Button(self.fig.add_axes([0.825, r[1] + 0.041,
+                                                 0.07, 0.033]), "< prev")
+        self.bt_next = Button(self.fig.add_axes([0.905, r[1] + 0.041,
+                                                 0.07, 0.033]), "next >")
+        self.bt_rdel = Button(self.fig.add_axes([0.825, r[1] + 0.003,
+                                                 0.07, 0.033]), "Delete")
+        self.bt_rclr = Button(self.fig.add_axes([0.905, r[1] + 0.003,
+                                                 0.07, 0.033]), "Clear")
+        self.bt_prev.on_clicked(lambda e: self._step_sel(-1))
+        self.bt_next.on_clicked(lambda e: self._step_sel(+1))
         self.bt_rdel.on_clicked(self._on_region_del)
-        self.bt_rclr = Button(self.fig.add_axes([0.835, r[1], 0.145, r[3]]),
-                              "Clear regions")
         self.bt_rclr.on_clicked(self._on_region_clr)
-        self.w3 += [self.bt_rdel, self.bt_rclr]
+        self.w3 += [self.radio_side, self.bt_prev, self.bt_next,
+                    self.bt_rdel, self.bt_rclr]
+
+        r = slot(split=(0.735, 0.05))
+        self.tb_mpx = TextBox(self.fig.add_axes(r), "map px ", initial="0.5")
+        self.bt_remeas = Button(self.fig.add_axes([0.81, r[1], 0.17, r[3]]),
+                                "Re-measure scan")
+        self.bt_remeas.on_clicked(self._on_remeasure)
+        self.w3 += [self.tb_mpx, self.bt_remeas]
+
+        self.lst = ListBox(self.fig, [0.67, 0.14, 0.31, 0.315], self._select,
+                           "thickness tiers  (base is the thinnest part)")
+        self.w3.append(self.lst)
 
         self._wy = 0.745
         # ---------- step 4 widgets
@@ -195,13 +340,17 @@ class App:
         r = slot(split=(0.67, 0.10))
         self.tb_ylen = TextBox(self.fig.add_axes(r), "cyl len ", initial="60")
         self.tb_ylen.on_submit(self._on_extra_edit)
-        self.bt_edel = Button(self.fig.add_axes([0.80, r[1], 0.08, r[3]]),
-                              "Del last")
+        self.tb_yc = TextBox(self.fig.add_axes([0.845, r[1], 0.055, r[3]]),
+                             "y-mid ", initial="0")
+        self.tb_yc.on_submit(self._on_extra_edit)
+        self.w4 += [self.tb_ylen, self.tb_yc]
+        r = slot(split=(0.67, 0.145))
+        self.bt_edel = Button(self.fig.add_axes(r), "Delete last extra")
         self.bt_edel.on_clicked(self._on_extra_del)
-        self.bt_eclr = Button(self.fig.add_axes([0.895, r[1], 0.08, r[3]]),
-                              "Clear")
+        self.bt_eclr = Button(self.fig.add_axes([0.835, r[1], 0.145, r[3]]),
+                              "Clear extras")
         self.bt_eclr.on_clicked(self._on_extra_clr)
-        self.w4 += [self.tb_ylen, self.bt_edel, self.bt_eclr]
+        self.w4 += [self.bt_edel, self.bt_eclr]
 
         self._wy = 0.745
         # ---------- step 5 widgets
@@ -290,9 +439,12 @@ class App:
         for ax in self.orient_axes:
             ax.set_visible(show_orient)
         self.ax_main.set_visible(not show_orient)
-        self.rsel.set_active(i in (2, 3))
-        if i == 2 and self.sil is not None and self.wmap is None:
-            self._compute_wmap()
+        self.rsel.set_active(i == 3)     # drag-a-box is step 4 only now
+        self._pick_base_armed = False
+        if i == 2:
+            if self.sil is not None and self.maps is None:
+                self._compute_maps()
+            self._refresh_list()
         self._draw()
 
     def _on_step(self, label):
@@ -331,9 +483,7 @@ class App:
         self.M = np.eye(3)
         self.offset = np.zeros(3)
         self._apply_transform(center=True)
-        self.sil = None
-        self.wmap = None
-        self.result = None
+        self._invalidate()
         self._status(f"Loaded {os.path.basename(path)}: "
                      f"{len(v)} verts, {len(f)} tris. Orient so that "
                      f"X=length, Y=across (thin), Z=height.")
@@ -373,7 +523,7 @@ class App:
 
     def _invalidate(self):
         self.sil = None
-        self.wmap = None
+        self.maps = None
         self.result = None
 
     # ================================================== step 2: silhouette
@@ -391,7 +541,7 @@ class App:
         except Exception as e:
             self._status(f"Silhouette failed: {e}")
             return
-        self.wmap = None
+        self.maps = None
         self.result = None
         self._status(f"Silhouette OK: {len(self.sil.polygon)} outline points. "
                      f"Interior windows/holes filled automatically.")
@@ -405,60 +555,291 @@ class App:
         core.export_outline_dxf(self.sil, out)
         self._status(f"DXF outline written: {out}")
 
-    def _compute_wmap(self):
-        self.wmap = core.width_map(self.verts, self.sil, px=0.6)
-        if self.base_width is None:
-            s = core.suggest_width(*self.wmap, rect=None, q=50)
-            self.base_width = round(s, 2) if s else 20.0
-            self.tb_base.set_val(str(self.base_width))
+    def _compute_maps(self):
+        if self.sil is None or self.verts is None:
+            return
+        try:
+            mpx = float(self.tb_mpx.text)
+        except ValueError:
+            mpx = 0.5
+        self.maps = core.measure_maps(self.verts, self.orig_faces, self.sil,
+                                      px=mpx)
+        if self.base_thickness is None:
+            t, y0 = core.base_from_maps(self.maps)
+            self.base_thickness = round(t, 2) if t else 20.0
+            self.base_y0 = round(y0, 2)
+        self._sync_boxes()
 
     # ================================================== step 3: regions
-    def _on_base_w(self, text):
-        try:
-            self.base_width = float(text)
-            self.result = None
-            self._draw()
-        except ValueError:
-            pass
+    def _selected(self):
+        if self.sel is None or not 0 <= self.sel < len(self.regions):
+            return None
+        return self.regions[self.sel]
 
-    def _on_region_w(self, text):
+    def _region_label(self, i):
+        r = self.regions[i]
+        if core.region_kind(r) == "rect":
+            return f"{i+1:2d} LR  {r['width']:6.2f}mm total (rectangle)"
+        area = r.get("area_mm2")
+        area = f"{area:6.0f}mm2" if area else "  EMPTY "
+        fo = ("   ?" if self.base_thickness is None else
+              f"{core.tier_offset(r, self.base_thickness, self.base_y0):5.2f}")
+        return (f"{i+1:2d} {SIDE_TAG[r['side']]} +{r['add_mm']:5.2f} "
+                f"face{fo} over{r['over_mm']:g} grow{r['grow_mm']:g}{area}")
+
+    def _refresh_list(self):
+        self.lst.set_items([self._region_label(i)
+                            for i in range(len(self.regions))], self.sel)
+
+    def _index_of(self, obj):
+        for i, r in enumerate(self.regions):
+            if r is obj:
+                return i
+        return None
+
+    def _sort_regions(self):
+        """Keep tiers in stacking order (side, then height) — thresholds
+        derive from the ordering, so it must not depend on click order."""
+        keep = self._selected()
+        self.regions = core.sort_tiers(self.regions)
+        self.sel = self._index_of(keep) if keep is not None else None
+
+    def _resegment(self):
+        if self.maps is None or self.base_thickness is None:
+            return
+        core.segment_all(self.maps, self.regions, self.base_thickness,
+                         self.base_y0)
+
+    def _coverage_note(self):
+        """One-line 'how much is still under-thick' summary."""
+        if self.maps is None or self.base_thickness is None:
+            return ""
+        cov = core.coverage_report(self.maps, self.regions,
+                                   self.base_thickness, self.base_y0)
+        bits = []
+        for side in ("left", "right"):
+            c = cov[side]
+            if c["short_mm"] > c["tol_mm"] and c["area_mm2"] >= 1.0:
+                bits.append(f"{side[0].upper()} {c['short_mm']:.2f}mm over "
+                            f"{c['area_mm2']:.0f}mm² (worst at X={c['at'][0]:g},"
+                            f" Z={c['at'][1]:g})")
+        return ("  Still under-thick: " + "; ".join(bits) if bits
+                else "  Tiers now cover the whole scan.")
+
+    def _sync_boxes(self):
+        """Push state into the text boxes without re-triggering their callbacks."""
+        self._sync = True
+        try:
+            if self.base_thickness is not None:
+                self.tb_base.set_val(f"{self.base_thickness:g}")
+            self.tb_y0.set_val(f"{self.base_y0:g}")
+            r = self._selected()
+            if r is None:
+                self.tb_add.set_val("")
+            elif core.region_kind(r) == "rect":
+                self.tb_add.set_val(f"{r['width']:g}")
+            else:
+                # note: the side radio is the *working* side (which map is
+                # shown, where the next click adds) and is deliberately not
+                # synced to the selection — otherwise adding a both-sided
+                # pair would silently drop you back to one side.
+                self.tb_add.set_val(f"{r['add_mm']:g}")
+                self.tb_over.set_val(f"{r['over_mm']:g}")
+                self.tb_grow.set_val(f"{r['grow_mm']:g}")
+        finally:
+            self._sync = False
+
+    def _select(self, i):
+        if i is not None and not 0 <= i < len(self.regions):
+            i = None
+        self.sel = i
+        self._sync_boxes()
+        self._refresh_list()
+        self._draw()
+
+    def _step_sel(self, d):
         if not self.regions:
             return
+        i = 0 if self.sel is None else (self.sel + d) % len(self.regions)
+        self._select(i)
+
+    def _region_at(self, x, z):
+        """Index of the topmost region containing world point (x, z)."""
+        for i in range(len(self.regions) - 1, -1, -1):
+            r = self.regions[i]
+            if core.region_kind(r) == "rect":
+                if (min(r["x0"], r["x1"]) <= x <= max(r["x0"], r["x1"])
+                        and min(r["z0"], r["z1"]) <= z <= max(r["z0"], r["z1"])):
+                    return i
+            elif any(MplPath(np.asarray(p)).contains_point((x, z))
+                     for p in r.get("polys", [])):
+                return i
+        return None
+
+    def _on_base_t(self, _text):
+        if self._sync:
+            return
         try:
-            self.regions[-1]["width"] = float(text)
-            self.result = None
-            self._draw()
+            self.base_thickness = float(self.tb_base.text)
+            self.base_y0 = float(self.tb_y0.text)
         except ValueError:
-            pass
+            return
+        self.result = None
+        self._resegment()
+        self._refresh_list()
+        self._status(f"Base tier {self.base_thickness:g} mm @ y0 "
+                     f"{self.base_y0:+g}.{self._coverage_note()}")
+        self._draw()
+
+    def _on_pick_base(self, _):
+        if self.step != 2:
+            return
+        if self.maps is None:
+            self._status("Extract a silhouette first (step 2).")
+            return
+        self._pick_base_armed = True
+        self._status("Click the THINNEST part of the frame — its measured "
+                     "thickness becomes the base tier, and every other tier "
+                     "stacks outward from it.")
+
+    def pick_base_at(self, x, z):
+        self._pick_base_armed = False
+        s = core.sample_maps(self.maps, x, z)
+        if s is None:
+            self._status("No scan data there — click inside the frame.")
+            return
+        self.base_thickness = round(s["total"], 2)
+        self.base_y0 = round((s["hR"] - s["hL"]) / 2, 2)
+        self.result = None
+        self._resegment()               # every tier measures from the base
+        self._sync_boxes()
+        self._refresh_list()
+        self._status(f"Base tier {self.base_thickness} mm, mid-plane y0 "
+                     f"{self.base_y0:+g} mm (faces {-s['hL']:+.2f} / "
+                     f"{s['hR']:+.2f}) from X={x:.1f}, Z={z:.1f}. Now click "
+                     f"each thicker feature to add a tier.{self._coverage_note()}")
+        self._draw()
+
+    def add_region(self, x, z, side=None):
+        """Add a tier picked at world XZ (both -> one tier on each side)."""
+        if self.maps is None:
+            self._status("Extract a silhouette first (step 2).")
+            return
+        if self.base_thickness is None:
+            self._status("Set the base thickness first.")
+            return
+        side = side or self.cur_side
+        try:
+            over = float(self.tb_over.text)
+            grow = float(self.tb_grow.text)
+        except ValueError:
+            over, grow = 0.3, 0.0
+        sides = ["left", "right"] if side == "both" else [side]
+        added = []
+        for s_ in sides:
+            t = core.make_tier(self.maps, x, z, s_, self.base_thickness,
+                               self.base_y0, over_mm=over, grow_mm=grow,
+                               tiers=self.regions)
+            if t is None:
+                self._status("No scan data there — click inside the frame.")
+                return
+            self.regions.append(t)
+            added.append(t)
+        self._sort_regions()
+        self.sel = self._index_of(added[-1])
+        self._resegment()               # a new tier re-cuts its neighbours
+        self.result = None
+        m = added[0]["measured"]
+        bits = ", ".join(f"{t['side']} +{t['add_mm']:.2f} mm "
+                         f"({t['area_mm2']:.0f} mm²)" for t in added)
+        self._sync_boxes()
+        self._refresh_list()
+        self._status(f"Tier: {bits} — scan faces here {-m['hL']:+.2f} / "
+                     f"{m['hR']:+.2f}, total {m['total']:.2f} mm. Everything "
+                     f"proud of the tier below is roped in."
+                     f"{self._coverage_note()}")
+        self._draw()
+
+    def _on_region_edit(self, _text):
+        if self._sync:
+            return
+        r = self._selected()
+        if r is None:
+            return          # with nothing selected the boxes are just defaults
+        try:
+            val = float(self.tb_add.text)
+        except ValueError:
+            return
+        if core.region_kind(r) == "rect":
+            r["width"] = val
+        else:
+            try:
+                over = float(self.tb_over.text)
+                grow = float(self.tb_grow.text)
+            except ValueError:
+                return
+            r["add_mm"], r["over_mm"], r["grow_mm"] = val, over, grow
+            self._sort_regions()
+            self._resegment()
+        self.result = None
+        self._refresh_list()
+        self._status(f"Tier updated: {r.get('side', '')} +{val:g} mm."
+                     f"{self._coverage_note()}")
+        self._draw()
+
+    def _on_side(self, label):
+        """The working side: which face map is shown and where clicks land.
+
+        A tier belongs to one side's stack for good — to move one, delete it
+        and re-pick it with the other side selected.
+        """
+        self.cur_side = SIDE_KEYS[SIDE_LABELS.index(label)]
+        if self._sync:
+            return
+        self._draw()
+
+    def _on_remeasure(self, _):
+        if self.sil is None:
+            self._status("Extract a silhouette first (step 2).")
+            return
+        self._compute_maps()
+        self._resegment()
+        self.result = None
+        self._sync_boxes()
+        self._refresh_list()
+        self._status(f"Thickness maps re-measured at {self.maps.px} mm/px; "
+                     f"{len(self.regions)} tier(s) re-cut."
+                     f"{self._coverage_note()}")
+        self._draw()
 
     def _on_region_del(self, _):
-        if self.regions:
-            self.regions.pop()
-            self.result = None
-            self._draw()
+        if self.step != 2 or not self.regions:
+            return
+        i = self.sel if self.sel is not None else len(self.regions) - 1
+        if 0 <= i < len(self.regions):
+            self.regions.pop(i)
+        self.sel = min(i, len(self.regions) - 1) if self.regions else None
+        self.result = None
+        self._resegment()        # the tier above inherits a lower threshold
+        self._select(self.sel)
 
     def _on_region_clr(self, _):
-        self.regions = []
-        self.result = None
-        self._draw()
-
-    def add_region(self, x0, z0, x1, z1):
-        if self.wmap is None:
+        if self.step != 2:
             return
-        s = core.suggest_width(*self.wmap, rect=(x0, z0, x1, z1))
-        w = round(s, 2) if s else (self.base_width or 20.0)
-        self.regions.append({"x0": round(x0, 2), "z0": round(z0, 2),
-                             "x1": round(x1, 2), "z1": round(z1, 2),
-                             "width": w})
-        self.tb_rw.set_val(str(w))
+        self.regions = []
+        self.sel = None
         self.result = None
-        self._status(f"Region {len(self.regions)}: measured width ≈ {w} mm "
-                     f"(95th pct). Override in 'last w' box.")
-        self._draw()
+        self._select(None)
 
     # ================================================== step 4: extras
     def _on_extra_kind(self, label):
         self.extra_kind = label
+
+    def _extra_yc(self):
+        try:
+            return float(self.tb_yc.text)
+        except ValueError:
+            return 0.0
 
     def add_extra_box(self, x0, z0, x1, z1):
         try:
@@ -466,12 +847,13 @@ class App:
             tilt = float(self.tb_tilt.text)
         except ValueError:
             yw, tilt = 20.0, 0.0
+        yc = self._extra_yc()
         self.extras.append({"kind": "box", "x0": round(x0, 2),
                             "z0": round(z0, 2), "x1": round(x1, 2),
                             "z1": round(z1, 2), "ywidth": yw,
-                            "tilt_deg": tilt})
+                            "tilt_deg": tilt, "yc": yc})
         self.result = None
-        self._status(f"Extra {len(self.extras)}: box, y-width {yw}, "
+        self._status(f"Extra {len(self.extras)}: box, y {yc:+g} ± {yw / 2:g}, "
                      f"tilt {tilt}°. Edit via text boxes (applies to last).")
         self._draw()
 
@@ -481,10 +863,13 @@ class App:
             ylen = float(self.tb_ylen.text)
         except ValueError:
             dia, ylen = 5.0, 60.0
+        yc = self._extra_yc()
         self.extras.append({"kind": "cyl_y", "x": round(x, 2),
-                            "z": round(z, 2), "dia": dia, "ylen": ylen})
+                            "z": round(z, 2), "dia": dia, "ylen": ylen,
+                            "yc": yc})
         self.result = None
-        self._status(f"Extra {len(self.extras)}: Y-cylinder ⌀{dia} × {ylen}.")
+        self._status(f"Extra {len(self.extras)}: Y-cylinder ⌀{dia} × {ylen} "
+                     f"centred at y {yc:+g}.")
         self._draw()
 
     def _on_extra_edit(self, _text):
@@ -492,6 +877,7 @@ class App:
             return
         e = self.extras[-1]
         try:
+            e["yc"] = float(self.tb_yc.text)
             if e["kind"] == "box":
                 e["ywidth"] = float(self.tb_yw.text)
                 e["tilt_deg"] = float(self.tb_tilt.text)
@@ -520,31 +906,38 @@ class App:
         x1, z1 = erelease.xdata, erelease.ydata
         if None in (x0, z0, x1, z1):
             return
-        if self.step == 2:
-            self.add_region(x0, z0, x1, z1)
-        elif self.step == 3 and self.extra_kind.startswith("box"):
+        if self.step == 3 and self.extra_kind.startswith("box"):
             self.add_extra_box(x0, z0, x1, z1)
 
+    def _toolbar_idle(self):
+        tb = self.fig.canvas.toolbar
+        return tb is None or getattr(tb, "mode", "") == ""
+
     def _on_click(self, event):
-        if (self.step == 3 and self.extra_kind.startswith("cyl")
-                and event.inaxes == self.ax_main and event.button == 1
-                and self.fig.canvas.toolbar is not None
-                and getattr(self.fig.canvas.toolbar, "mode", "") == ""):
-            if event.xdata is not None:
-                self.add_extra_cyl(event.xdata, event.ydata)
-        elif (self.step == 3 and self.extra_kind.startswith("cyl")
-                and event.inaxes == self.ax_main and event.button == 1
-                and self.fig.canvas.toolbar is None):
-            if event.xdata is not None:
-                self.add_extra_cyl(event.xdata, event.ydata)
+        if event.inaxes is not self.ax_main or not self._toolbar_idle():
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        x, z = event.xdata, event.ydata
+        if self.step == 2:                       # regions
+            if event.button == 3:
+                self._select(self._region_at(x, z))
+            elif event.button == 1:
+                if self._pick_base_armed:
+                    self.pick_base_at(x, z)
+                else:
+                    self.add_region(x, z)
+        elif (self.step == 3 and event.button == 1
+                and self.extra_kind.startswith("cyl")):
+            self.add_extra_cyl(x, z)
 
     # ================================================== step 5: build
     def _on_build(self, _):
         if self.sil is None:
             self._status("Need a silhouette first (step 2).")
             return
-        if self.base_width is None:
-            self._status("Set a base width first (step 3).")
+        if self.base_thickness is None:
+            self._status("Set a base thickness first (step 3).")
             return
         try:
             vox = float(self.tb_vox.text)
@@ -556,8 +949,9 @@ class App:
         self.fig.canvas.draw()
         try:
             v, f, rep, pack = core.build_solid(
-                self.sil, self.base_width, self.regions, self.extras,
-                clearance=clr, voxel=vox, return_sdf=True)
+                self.sil, self.base_thickness, self.regions, self.extras,
+                clearance=clr, voxel=vox, return_sdf=True,
+                base_y0=self.base_y0)
         except MemoryError:
             self._status("Out of memory — increase voxel size.")
             return
@@ -566,9 +960,11 @@ class App:
             return
         self.result = (v, f, rep, pack)
         wt = "WATERTIGHT ✓" if rep["watertight"] else "NOT watertight ✗"
+        skipped = (f" {rep['regions_skipped']} region(s) had no footprint and "
+                   f"were skipped." if rep.get("regions_skipped") else "")
         self._status(f"Built: {rep['faces']} tris, {rep['volume_cm3']:.1f} cm³, "
                      f"voxel {vox} mm, clearance {clr} mm — {wt}. "
-                     f"Grid {rep['grid']} ({rep['grid_mem_mb']} MB). "
+                     f"Grid {rep['grid']} ({rep['grid_mem_mb']} MB).{skipped} "
                      f"Inspect sections, then Save STL.")
         self._draw()
 
@@ -588,7 +984,9 @@ class App:
              "M": self.M.tolist(), "offset": self.offset.tolist(),
              "sil": {"px": self.tb_px.text, "close": self.tb_close.text,
                      "simplify": self.tb_simp.text},
-             "base_width": self.base_width,
+             "base_thickness": self.base_thickness,
+             "base_y0": self.base_y0,
+             "map_px": self.tb_mpx.text,
              "regions": self.regions, "extras": self.extras,
              "build": {"voxel": self.tb_vox.text,
                        "clearance": self.tb_clr.text,
@@ -611,11 +1009,15 @@ class App:
         self.tb_vox.set_val(d["build"]["voxel"])
         self.tb_clr.set_val(d["build"]["clearance"])
         self.tb_out.set_val(d["build"].get("out", "frame_solid.stl"))
-        self.base_width = d.get("base_width")
-        if self.base_width:
-            self.tb_base.set_val(str(self.base_width))
+        self.tb_mpx.set_val(str(d.get("map_px", "0.5")))
+        # base_width is the pre-two-sided key name
+        self.base_thickness = d.get("base_thickness", d.get("base_width"))
+        self.base_y0 = float(d.get("base_y0", 0.0))
         self.regions = d.get("regions", [])
         self.extras = d.get("extras", [])
+        self.sel = len(self.regions) - 1 if self.regions else None
+        self._sync_boxes()
+        self._refresh_list()
         sp = d.get("scan_path", "")
         if sp and os.path.isfile(sp):
             self.tb_path.set_val(sp)
@@ -626,7 +1028,7 @@ class App:
             self.offset = np.asarray(d["offset"])
             self._apply_transform(center=False)
             self.sil = None
-            self.wmap = None
+            self.maps = None
             self.result = None
             self._status(f"Project loaded; scan reloaded ({len(v)} verts). "
                          f"Re-run step 2 (Extract) to continue.")
@@ -684,17 +1086,29 @@ class App:
             ax.set_aspect("equal")
 
         elif self.step == 2:    # regions
-            if self.wmap is not None:
-                wm, x0, z0, px = self.wmap
-                h, w = wm.shape
-                im = ax.imshow(wm, origin="lower", cmap="viridis",
-                               extent=(x0, x0 + w * px, z0, z0 + h * px))
-                ax.set_title(f"Thickness map — base {self.base_width} mm; "
-                             "drag rectangles for plateau regions")
-            elif self.sil is not None:
-                self._compute_wmap()
-                self._draw()
-                return
+            if self.maps is None and self.sil is not None:
+                self._compute_maps()
+            if self.maps is not None:
+                m = self.maps.face_map(self.cur_side)
+                finite = m[np.isfinite(m)]
+                if finite.size:
+                    vmin, vmax = np.percentile(finite, [2, 98])
+                else:
+                    vmin, vmax = 0.0, 1.0
+                if vmax - vmin < 1e-6:
+                    vmax = vmin + 1.0
+                ax.imshow(m, origin="lower", cmap="viridis", vmin=vmin,
+                          vmax=vmax, extent=self.maps.world_extent())
+                what = {"left": "LEFT face (-Y)", "right": "RIGHT face (+Y)",
+                        "both": "TOTAL thickness"}[self.cur_side]
+                base = ("?" if self.base_thickness is None
+                        else f"{self.base_thickness:g}")
+                armed = ("CLICK THE THINNEST PART TO SET THE BASE TIER"
+                         if self._pick_base_armed else
+                         "click = add a tier · right-click = select")
+                ax.set_title(f"{what} from the scan, {vmin:.1f}–{vmax:.1f} mm "
+                             f"· base {base} mm @ y0 {self.base_y0:+g}\n"
+                             f"{armed}", fontsize=10)
             else:
                 ax.set_title("Extract a silhouette first (step 2)")
             if self.sil is not None:
@@ -720,7 +1134,8 @@ class App:
                     rot = pts @ np.array([[c, -s], [s, c]]).T + [cx, cz]
                     ax.add_patch(MplPolygon(rot, closed=True, fill=False,
                                             ec="tab:red", lw=2))
-                    ax.text(cx, cz, f"#{i+1} y±{e['ywidth']/2:.0f}",
+                    yc = e.get("yc", 0.0)
+                    ax.text(cx, cz, f"#{i+1} y{yc:+g}±{e['ywidth']/2:.0f}",
                             color="tab:red", fontsize=8, ha="center")
                 else:
                     ax.add_patch(MplCircle((e["x"], e["z"]), e["dia"] / 2,
@@ -729,7 +1144,7 @@ class App:
                             f"#{i+1} ⌀{e['dia']}", color="tab:blue",
                             fontsize=8, ha="center")
             ax.set_title("Extras: drag = box, click = Y-cylinder "
-                         "(kind set at right)")
+                         "(kind set at right; y-mid offsets it off centre)")
             ax.set_aspect("equal")
 
         elif self.step == 4:    # build
@@ -761,18 +1176,42 @@ class App:
         self.fig.canvas.draw_idle()
 
     def _draw_regions(self, ax, faint=False):
-        colors = ["tab:orange", "tab:green", "tab:red", "tab:purple",
-                  "tab:brown", "tab:pink"]
+        colors = ["tab:orange", "tab:red", "tab:cyan", "tab:purple",
+                  "tab:brown", "tab:pink", "yellow", "lime"]
         alpha = 0.5 if faint else 1.0
         for i, r in enumerate(self.regions):
             c = colors[i % len(colors)]
-            x0, x1 = min(r["x0"], r["x1"]), max(r["x0"], r["x1"])
-            z0, z1 = min(r["z0"], r["z1"]), max(r["z0"], r["z1"])
-            ax.add_patch(plt.Rectangle((x0, z0), x1 - x0, z1 - z0, fill=False,
-                                       ec=c, lw=2, alpha=alpha))
+            sel = (not faint) and i == self.sel
+            lw = 3.0 if sel else 1.8
+            if core.region_kind(r) == "rect":
+                x0, x1 = min(r["x0"], r["x1"]), max(r["x0"], r["x1"])
+                z0, z1 = min(r["z0"], r["z1"]), max(r["z0"], r["z1"])
+                ax.add_patch(plt.Rectangle((x0, z0), x1 - x0, z1 - z0,
+                                           fill=False, ec=c, lw=lw,
+                                           alpha=alpha))
+                lx, lz = x0 + 1, z0 + 1
+                label = f"#{i+1}: {r['width']}mm"
+            else:
+                polys = r.get("polys") or []
+                if not polys:
+                    continue
+                for p in polys:
+                    p = np.asarray(p, float)
+                    if sel:
+                        ax.add_patch(MplPolygon(p, closed=True, fc=c,
+                                                ec="none", alpha=0.25))
+                    ax.add_patch(MplPolygon(p, closed=True, fill=False, ec=c,
+                                            lw=lw, alpha=alpha))
+                ax.plot([r["x"]], [r["z"]], "+", color=c, ms=9, mew=2,
+                        alpha=alpha)
+                # label at the pick point, stepped so stacked tiers picked in
+                # the same place don't write on top of each other
+                lx, lz = r["x"] + 1.5, r["z"] + 1.5 + 3.0 * i
+                label = (f"#{i+1} {SIDE_TAG[r['side']].strip()} "
+                         f"+{r['add_mm']:g}mm")
             if not faint:
-                ax.text(x0 + 1, z0 + 1, f"#{i+1}: {r['width']}mm", color=c,
-                        fontsize=9)
+                ax.text(lx, lz, label, color=c, fontsize=8,
+                        weight="bold" if sel else "normal")
 
 
 def main():

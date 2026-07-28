@@ -3,7 +3,8 @@
 Turns a 3D scan of a pistol frame into a clean, watertight **subtraction
 solid** — the thing you boolean-subtract from a donor grip exterior to make a
 transplanted grip. Fills magwell windows and pin holes automatically, rebuilds
-the frame as flat-sided plateau extrusions at calipered widths, lets you add
+the frame as a stack of flat **thickness tiers, independently per side** (so a
+trigger-bar relief on the right doesn't fatten the left), lets you add
 clearance solids (magazine path, grip screws, levers), applies a fit-clearance
 offset, and exports a guaranteed-watertight STL.
 
@@ -24,7 +25,8 @@ thicknesses) — the default scan path points at it.
 After the Orient step your scan must sit like this (all mm):
 
 - **X** = along the bore / frame length
-- **Y** = across the frame (left-right); symmetry plane at **Y = 0**
+- **Y** = across the frame (left-right); mid-plane near **Y = 0** (it needn't
+  be exact — step 3's `y0` measures where it actually is)
 - **Z** = vertical
 
 The side view (X-Z) is what becomes the outline. If you've already aligned the
@@ -47,25 +49,51 @@ fine), `close` closes gaps up to this size (scanner dropouts), `simp` outline
 simplification tolerance. "Export DXF" writes the outline for tracing in
 SolveSpace if you'd rather rebuild in CAD.
 
-**3 · Regions.** Shows a thickness heatmap measured from the scan (left-right
-width per side-view pixel). The **base width** (prefilled with the scan's
-median) applies to the whole outline; drag rectangles over areas that are
-thicker or thinner — rails, bosses, tangs — and each gets the measured 95th-
-percentile width, which you can override in the "last w" box (calipers beat
-the scanner; trust your measurement). Later rectangles override earlier ones
-where they overlap.
+**3 · Tiers.** The real frame's bumpy, continuously varying thickness gets
+simplified into a handful of flat **thickness tiers per side** — typically
+3–5. The heatmap shows where the scan's surface sits on the side you're
+working on (left / right / total, set by the radio), so bosses and reliefs
+stand out.
+
+- **Pick base**, then click the *thinnest* part of the frame (usually the
+  magazine housing). That's the base tier: the whole silhouette, extruded to
+  that thickness. `y0` is the mid-plane it's centred on, measured at your
+  click — this matters, because an asymmetric frame's true mid-plane is not
+  where step 1's bounding-box centring put it.
+- Then **click each thicker feature**. A tier's outline is *everything on
+  that side standing proud of the tier below it*, anywhere on the frame — so
+  one click on the frame body ropes in every trigger-bar relief, spring
+  channel and boss above the base at once, and extrudes them all to the
+  thickness you clicked. Click a fatter area for the next tier up, and so on.
+- `+mm` is how far proud of the base that tier stands (prefilled from the
+  scan, override with calipers — the outline doesn't move when you do).
+  `over` is how much proud of the tier below a feature must be to get roped
+  in: a noise margin, 0.3 mm suits most scanners. `grow` Minkowski-grows the
+  outline for parts that have to *move* — a trigger bar needs room fore, aft
+  and up, not just clearance on its face.
+- Every tier is listed at the right; click a row (or right-click the map) to
+  select one and edit or delete it. Tiers keep themselves in stacking order.
+- The status line reports what the stack still leaves **under-thick**, with
+  the worst spot's coordinates. Zero means the tiers cover the whole scan;
+  anything significant means you need another tier there.
+
+Thickness always rounds **up**: a feature only 0.5 mm proud of a tier gets
+pulled up to the next one. Too thick only costs grip wall thickness, too thin
+means the grip fouls the frame.
 
 **4 · Extras.** Clearance solids beyond the frame itself, in the same
-coordinates. **Drag** to add a box (set its across-width and tilt first — e.g.
-a magazine insertion path angled with the grip, drawn from above the magwell
-down past where any grip could reach). **Click** to add a Y-axis cylinder
-(grip screw holes, pin punches — set diameter/length first). The text boxes
-edit the **last** extra added. Everything here gets unioned with the frame
-before subtraction, so nothing you build later can block a magazine or bury a
-screw.
+coordinates. **Drag** to add a box (set its across-width, tilt and `y-mid`
+first — e.g. a magazine insertion path angled with the grip, drawn from above
+the magwell down past where any grip could reach). **Click** to add a Y-axis
+cylinder (grip screw holes, pin punches — set diameter/length first). `y-mid`
+offsets an extra off the centreline, for reliefs that belong on one side only.
+The text boxes edit the **last** extra added. Everything here gets unioned
+with the frame before subtraction, so nothing you build later can block a
+magazine or bury a screw.
 
-**5 · Build.** Voxel signed-distance-field build: outline extruded per-region
-to its width, extras unioned, everything dilated by `clearance`, then meshed.
+**5 · Build.** Voxel signed-distance-field build: outline extruded to the
+tier stack on each side, extras unioned, everything dilated by `clearance`,
+then meshed.
 This engine cannot produce a broken boolean — the output is checked and
 reported watertight. Inspect side- and cross-sections with the slider, then
 Save STL. Voxel 0.3 mm is a good preview; 0.15–0.2 mm for the final (watch the
@@ -94,12 +122,16 @@ test-fit before cutting wood; edit one number and rebuild.
 
 ## Notes & limits
 
-- The rebuild is 2.5D: flat-sided plateau extrusions symmetric about Y=0. Edge
-  rounds and chamfers on the real frame become sharp corners — a superset of
-  the frame, which for a subtraction solid just means harmless extra internal
-  clearance. Genuinely non-2.5D features (angled dovetails, tapered magwell
-  mouths) — cover them with an oversized box/cylinder extra.
-- Widths are measured from the scan but noisy; override with caliper numbers.
+- The rebuild is 2.5D per side: each tier is a flat extrusion, and the two
+  sides are independent (the solid is not symmetric about Y=0). Edge rounds
+  and chamfers on the real frame become steps — a superset of the frame,
+  which for a subtraction solid just means harmless extra internal clearance.
+  Genuinely non-2.5D features (angled dovetails, tapered magwell mouths) —
+  cover them with an oversized box/cylinder extra.
+- A tier's outline is clipped to the silhouette, so `grow` cannot push it
+  past the frame profile; use an extra where the frame exits the grip.
+- Thicknesses are measured from the scan but noisy; override with caliper
+  numbers. The outline a tier covers never depends on that override.
 - The silhouette keeps only the largest outer contour: crop turntable junk and
   disconnected debris from the scan beforehand (MeshMixer select+discard).
 - Files: `app.py` (GUI), `core.py` (pipeline, importable for scripting),

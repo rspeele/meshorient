@@ -2,14 +2,34 @@
 
 Coordinate convention (after the Orient step):
     X = along the bore / frame length
-    Y = across the frame (left-right); the frame's symmetry plane is Y = 0
+    Y = across the frame (left-right); Y = 0 is the frame's mid-plane
     Z = vertical (grip height)
 The "side view" is the XZ plane, looking along +Y. All units are mm.
 
 Pipeline:
     scan mesh -> orient -> side-view silhouette (outer contour only, windows
-    filled) -> width (thickness) map -> plateau regions -> extras (screw
-    holes, magazine path, ...) -> SDF voxel build -> watertight STL.
+    filled) -> two-sided surface maps (where the scan's left and right faces
+    sit, per side-view pixel) -> thickness regions -> extras (screw holes,
+    magazine path, ...) -> SDF voxel build -> watertight STL.
+
+The solid is NOT symmetric about Y=0. It is bounded by two independent face
+surfaces yL(x,z) <= y <= yR(x,z), built from a stack of thickness TIERS per
+side. The real frame's fuzzy, continuously varying thickness is quantised
+into 3-5 flat tiers per side, always rounding UP:
+
+    base       — the whole silhouette, at the thickness of the THINNEST part
+                 of the frame, centred on base_y0
+    tier       — picked by clicking a thicker feature. Its outline is
+                 everything on that side standing proud of the tier below it
+                 (by more than over_mm, to ride out scanner noise), wherever
+                 it is on the frame; that outline is extruded out to this
+                 tier's own height, add_mm proud of the base.
+
+So each tier is a superset of the one above it, and they stack outward. A
+feature only 0.5 mm proud of the tier below still gets pulled all the way up
+to the next tier — deliberately: a too-thick subtraction solid only costs
+grip wall thickness, a too-thin one means the grip fouls the frame.
+core.coverage_report() measures what the tier stack still leaves short.
 """
 from __future__ import annotations
 
@@ -133,41 +153,378 @@ def export_outline_dxf(sil: Silhouette, path: str):
     save_dxf_polyline(path, sil.polygon, closed=True)
 
 
-# ============================================================== width map
+# =========================================================== surface maps
 
-def width_map(verts, sil: Silhouette, px=0.6):
-    """Measured left-right width of the scan per side-view pixel.
+SIDES = ("left", "right", "both")
 
-    Returns (wmap, x0, z0, px): wmap in mm, NaN where unmeasured/outside.
+
+class ThicknessMaps:
+    """Where the scan's left and right faces sit, per side-view pixel.
+
+    hL and hR are distances from the Y=0 mid-plane, positive outward, so the
+    scan occupies -hL <= y <= +hR and its total thickness is hL + hR.
+    NaN where the scan gave no measurement or the pixel is outside the
+    silhouette.  Rows = Z (row 0 = min Z), cols = X.
     """
-    x, y, z = verts[:, 0], verts[:, 1], verts[:, 2]
+
+    def __init__(self, hL, hR, sil_mask, x0, z0, px):
+        self.hL = hL
+        self.hR = hR
+        self.sil_mask = sil_mask     # silhouette at this resolution, 0/255
+        self.x0, self.z0, self.px = x0, z0, px
+
+    @property
+    def total(self):
+        return self.hL + self.hR
+
+    def face_map(self, side):
+        """The map a region of this side is segmented against."""
+        if side == "left":
+            return self.hL
+        if side == "right":
+            return self.hR
+        return self.total
+
+    def world_extent(self):
+        h, w = self.hL.shape
+        return (self.x0 - self.px / 2, self.x0 + (w - 0.5) * self.px,
+                self.z0 - self.px / 2, self.z0 + (h - 0.5) * self.px)
+
+    def rc(self, x, z):
+        """World XZ -> (row, col), clipped to the map."""
+        h, w = self.hL.shape
+        c = int(np.clip(round((x - self.x0) / self.px), 0, w - 1))
+        r = int(np.clip(round((z - self.z0) / self.px), 0, h - 1))
+        return r, c
+
+
+def _minmax_by_cell(lin, vals, n):
+    """Per-cell min and max of vals grouped by lin (inf/-inf where empty)."""
+    lo = np.full(n, np.inf)
+    hi = np.full(n, -np.inf)
+    order = np.argsort(lin, kind="stable")
+    ls, vs = lin[order], vals[order]
+    starts = np.flatnonzero(np.r_[True, ls[1:] != ls[:-1]])
+    keys = ls[starts]
+    lo[keys] = np.minimum.reduceat(vs, starts)
+    hi[keys] = np.maximum.reduceat(vs, starts)
+    return lo, hi
+
+
+def _fill_gaps(m, sil_small, k=5):
+    """Fill scanner dropouts by grey-closing; keep NaN outside the outline."""
+    nan = ~np.isfinite(m)
+    filled = np.where(nan, 0.0, m).astype(np.float32)
+    closed = cv2.morphologyEx(filled, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
+    out = np.where(nan, closed, m)
+    out[nan & (closed <= 0)] = np.nan        # nothing nearby to borrow from
+    # A hole in the outer face lets an inner one (a magwell wall, say) show
+    # through as a pit. A 3x3 grey close pulls those back up to their
+    # neighbours without moving real edges.
+    ok = np.isfinite(out)
+    lo = np.nanmin(out) if ok.any() else 0.0
+    dense = np.where(ok, out, lo).astype(np.float32)
+    out = np.where(ok, cv2.morphologyEx(dense, cv2.MORPH_CLOSE,
+                                        np.ones((3, 3), np.uint8)), np.nan)
+    out[sil_small == 0] = np.nan
+    return out
+
+
+def _surface_samples(verts, faces, px, seed=0, max_per_tri=4096):
+    """Points scattered over the triangles, ~2 per pixel of projected area.
+
+    Sampling the surface rather than just the vertices keeps the maps free of
+    holes when the mesh is tessellated coarser than the map resolution — a
+    hole there splits a tier's outline in two.
+    """
+    if faces is None or len(faces) == 0:
+        return verts
+    tv = verts[faces]                                    # (M,3,3)
+    a = tv[:, 1][:, [0, 2]] - tv[:, 0][:, [0, 2]]        # XZ edge vectors
+    b = tv[:, 2][:, [0, 2]] - tv[:, 0][:, [0, 2]]
+    area_px = 0.5 * np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) / (px * px)
+    n = np.clip(np.ceil(2 * area_px), 1, max_per_tri).astype(np.int64)
+    idx = np.repeat(np.arange(len(faces)), n)
+    rng = np.random.default_rng(seed)                    # deterministic
+    r1, r2 = rng.random(len(idx)), rng.random(len(idx))
+    s = np.sqrt(r1)
+    w = np.stack([1 - s, s * (1 - r2), s * r2], axis=1)  # barycentric
+    pts = np.einsum("ij,ijk->ik", w, tv[idx])
+    return np.vstack([verts, pts])
+
+
+def measure_maps(verts, faces, sil: Silhouette, px=0.5) -> ThicknessMaps:
+    """Measure the scan's left/right face positions over the side view."""
+    pts = _surface_samples(verts, faces, px)
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
     ex = sil.world_extent()
     x0, z0 = ex[0], ex[2]
     w = int(np.ceil((ex[1] - x0) / px)) + 1
     h = int(np.ceil((ex[3] - z0) / px)) + 1
     ci = np.clip(((x - x0) / px).round().astype(int), 0, w - 1)
     ri = np.clip(((z - z0) / px).round().astype(int), 0, h - 1)
-    lin = ri * w + ci
-    ymin = np.full(h * w, np.inf)
-    ymax = np.full(h * w, -np.inf)
-    np.minimum.at(ymin, lin, y)
-    np.maximum.at(ymax, lin, y)
-    wm = (ymax - ymin).reshape(h, w)
-    wm[~np.isfinite(wm)] = np.nan
+    ymin, ymax = _minmax_by_cell(ri * w + ci, y, h * w)
 
-    # fill small gaps with grey-closing
-    filled = wm.copy()
-    nanmask = np.isnan(filled)
-    filled[nanmask] = 0
-    k = np.ones((5, 5), np.uint8)
-    closed = cv2.morphologyEx(filled.astype(np.float32), cv2.MORPH_CLOSE, k)
-    wm = np.where(nanmask, closed, wm)
-    wm[wm <= 0] = np.nan
-
-    # mask to silhouette
+    hL = (-ymin).reshape(h, w)               # positive outward, both sides
+    hR = ymax.reshape(h, w)
     sil_small = cv2.resize(sil.mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    wm[sil_small == 0] = np.nan
-    return wm, x0, z0, px
+    return ThicknessMaps(_fill_gaps(hL, sil_small), _fill_gaps(hR, sil_small),
+                         sil_small, x0, z0, px)
+
+
+def sample_maps(maps: ThicknessMaps, x, z, r_mm=1.0):
+    """Robust (median) sample of the maps around a world XZ point.
+
+    Returns {"hL","hR","total"} in mm, or None if there is no data there.
+    """
+    r, c = maps.rc(x, z)
+    k = max(0, int(round(r_mm / maps.px)))
+    h, w = maps.hL.shape
+    sl = (slice(max(0, r - k), min(h, r + k + 1)),
+          slice(max(0, c - k), min(w, c + k + 1)))
+    out = {}
+    for name, m in (("hL", maps.hL), ("hR", maps.hR)):
+        vals = m[sl]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return None
+        out[name] = float(np.median(vals))
+    out["total"] = out["hL"] + out["hR"]
+    return out
+
+
+def median_thickness(maps: ThicknessMaps):
+    """Median total thickness over the whole outline (base-thickness guess)."""
+    vals = maps.total
+    vals = vals[np.isfinite(vals)]
+    return float(np.median(vals)) if vals.size else None
+
+
+def base_from_maps(maps: ThicknessMaps):
+    """Whole-outline guess at (base thickness, base mid-plane offset)."""
+    tot, off = maps.total, (maps.hR - maps.hL) / 2.0
+    tot, off = tot[np.isfinite(tot)], off[np.isfinite(off)]
+    if not tot.size:
+        return None, 0.0
+    return float(np.median(tot)), float(np.median(off))
+
+
+def base_faces(base_thickness, base_y0=0.0):
+    """(yR, yL) of the base slab: base_y0 ± base_thickness/2."""
+    return base_y0 + base_thickness / 2.0, base_y0 - base_thickness / 2.0
+
+
+def region_kind(region):
+    """'tier' (click-picked thickness tier) or 'rect' (legacy rectangle)."""
+    if region.get("kind") == "rect" or ("width" in region and "x0" in region):
+        return "rect"
+    return "tier"
+
+
+def base_offset(side, base_thickness, base_y0=0.0):
+    """How far the base's face on `side` stands off the mid-plane."""
+    half = float(base_thickness) / 2.0
+    return half + base_y0 if side == "right" else half - base_y0
+
+
+def tier_offset(tier, base_thickness, base_y0=0.0):
+    """How far this tier's face stands off the mid-plane (base + add_mm)."""
+    return (base_offset(tier["side"], base_thickness, base_y0)
+            + float(tier.get("add_mm", 0.0)))
+
+
+def _prev_offset(tiers, tier, base_thickness, base_y0=0.0):
+    """The offset of the tier immediately below this one, on its own side.
+
+    That is the threshold this tier segments against: everything standing
+    proud of the tier below gets pulled into this tier's outline.
+    """
+    side = tier["side"]
+    fo = tier_offset(tier, base_thickness, base_y0)
+    prev = base_offset(side, base_thickness, base_y0)
+    for u in tiers:
+        if u is tier or region_kind(u) != "tier" or u.get("side") != side:
+            continue
+        f = tier_offset(u, base_thickness, base_y0)
+        if prev < f < fo:
+            prev = f
+    return prev
+
+
+def region_faces(region, base_thickness, base_y0=0.0):
+    """Face positions (yR, yL) this region assigns; None = side untouched."""
+    if region_kind(region) == "rect":
+        w = float(region["width"])
+        return base_y0 + w / 2.0, base_y0 - w / 2.0
+    fo = tier_offset(region, base_thickness, base_y0)
+    return (fo, None) if region["side"] == "right" else (None, -fo)
+
+
+def make_tier(maps: ThicknessMaps, x, z, side, base_thickness, base_y0=0.0,
+              over_mm=0.3, grow_mm=0.0, add_mm=None, tiers=()):
+    """Build a thickness tier from a click at world XZ.
+
+    add_mm — how far this tier stands proud of the base, on its own side.
+    Defaults to the scan's own value under the click, and may be overridden
+    (calipers beat the scanner) without changing which pixels it covers: the
+    footprint always comes from the tier below it, not from this number.
+
+    Returns the tier dict, or None if the scan has no data at that point.
+    """
+    s = sample_maps(maps, x, z)
+    if s is None:
+        return None
+    if add_mm is None:
+        here = s["hR"] if side == "right" else s["hL"]
+        add_mm = here - base_offset(side, base_thickness, base_y0)
+    t = {"kind": "tier", "side": side,
+         "x": round(float(x), 2), "z": round(float(z), 2),
+         "add_mm": round(float(add_mm), 2),
+         "over_mm": float(over_mm), "grow_mm": float(grow_mm),
+         "measured": {k: round(v, 2) for k, v in s.items()}}
+    segment_tier(maps, list(tiers) + [t], t, base_thickness, base_y0)
+    return t
+
+
+def segment_tier(maps: ThicknessMaps, tiers, tier, base_thickness,
+                 base_y0=0.0, close_mm=1.0, min_area_mm2=2.0,
+                 simplify_mm=0.3):
+    """(Re)compute a tier's outline from the scan; sets tier["polys"].
+
+    Everything standing proud of the tier below — by more than over_mm, to
+    ride out scanner noise — is roped in, wherever it is on the frame, then
+    interior holes are filled (outer contours only, the same trick the
+    silhouette uses) and the outline is grown by grow_mm.
+
+    Returns the total footprint area in mm² (0.0 if nothing matched).
+    """
+    tier["polys"] = []
+    tier["area_mm2"] = 0.0
+    if region_kind(tier) != "tier":
+        return None
+    px = maps.px
+    m = maps.face_map(tier["side"])
+    thr = (_prev_offset(tiers, tier, base_thickness, base_y0)
+           + float(tier.get("over_mm", 0.3)))
+
+    img = np.zeros(m.shape, np.uint8)
+    img[np.isfinite(m) & (m > thr)] = 255
+    k = max(3, int(round(close_mm / px)) | 1)
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    # Opening kills speckle, but along the silhouette edge the map is only
+    # partly covered by the frame, so opening there would nibble a sliver off
+    # the outline and leave that rim of the solid under-thick. Keep the raw
+    # threshold on that rim.
+    rim = cv2.bitwise_and(maps.sil_mask, cv2.bitwise_not(
+        cv2.erode(maps.sil_mask, np.ones((5, 5), np.uint8))))
+    img = cv2.bitwise_or(cv2.morphologyEx(img, cv2.MORPH_OPEN, kern),
+                         cv2.bitwise_and(img, rim))
+    img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kern)     # bridge dropouts
+
+    grow = float(tier.get("grow_mm", 0.0))
+    if grow > 0:
+        kk = max(3, int(round(2 * grow / px)) | 1)
+        img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                                        (kk, kk)))
+    img = cv2.bitwise_and(img, maps.sil_mask)
+
+    cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polys, total = [], 0.0
+    for c in cnts:
+        area = float(cv2.contourArea(c)) * px * px
+        if area < min_area_mm2:
+            continue
+        approx = cv2.approxPolyDP(c, max(1.0, simplify_mm / px), True)
+        approx = approx.reshape(-1, 2).astype(np.float64)
+        if len(approx) < 3:
+            continue
+        polys.append([[round(maps.x0 + a * px, 3), round(maps.z0 + b * px, 3)]
+                      for a, b in approx])
+        total += area
+    tier["polys"] = polys
+    tier["area_mm2"] = round(total, 1)
+    tier["threshold_mm"] = round(thr, 3)
+    return total
+
+
+def segment_all(maps: ThicknessMaps, regions, base_thickness, base_y0=0.0):
+    """Re-segment every tier — thresholds are relative, so they all move."""
+    for t in regions:
+        if region_kind(t) == "tier":
+            segment_tier(maps, regions, t, base_thickness, base_y0)
+
+
+def sort_tiers(regions):
+    """Tiers ordered by side then thickness (the order they stack in)."""
+    return sorted(regions, key=lambda r: (
+        0 if region_kind(r) == "rect" else 1,
+        r.get("side", ""), float(r.get("add_mm", 0.0))))
+
+
+def _raster_polys_map(polys, maps: ThicknessMaps):
+    """Rasterize world-XZ polygons in map orientation (rows = Z, cols = X)."""
+    img = np.zeros(maps.hL.shape, np.uint8)
+    conts = []
+    for p in polys:
+        p = np.asarray(p, np.float64)
+        if len(p) < 3:
+            continue
+        q = np.empty_like(p)
+        q[:, 0] = (p[:, 0] - maps.x0) / maps.px      # col = x
+        q[:, 1] = (p[:, 1] - maps.z0) / maps.px      # row = z
+        conts.append(np.round(q).astype(np.int32))
+    if conts:
+        cv2.fillPoly(img, conts, 255)
+    return img > 0
+
+
+def coverage_report(maps: ThicknessMaps, regions, base_thickness, base_y0=0.0,
+                    tol_mm=0.25):
+    """How much of the real frame the tier model still leaves under-thick.
+
+    Tiers round thickness UP, so anything left short is a place where the
+    subtraction solid is thinner than the scan — i.e. where the transplanted
+    grip would foul the frame. Returns per side:
+        {"short_mm": worst shortfall, "at": (x, z),
+         "area_mm2": area short by more than tol_mm}
+    tol_mm exists because a scan is noisy: the maps take the outermost sample
+    per pixel, so a flat face reads a tenth of a millimetre proud of itself.
+    """
+    out = {}
+    for side in ("left", "right"):
+        m = maps.face_map(side)
+        built = np.full(m.shape, base_offset(side, base_thickness, base_y0),
+                        np.float32)
+        for t in regions:
+            if region_kind(t) != "tier" or t.get("side") != side:
+                continue
+            if not t.get("polys"):
+                continue
+            mask = _raster_polys_map(t["polys"], maps)
+            fo = tier_offset(t, base_thickness, base_y0)
+            np.maximum(built, np.where(mask, fo, -np.inf).astype(np.float32),
+                       out=built)
+        # a tier's outline has to cut somewhere inside the boundary pixel, so
+        # forgive a one-pixel transition band; real gaps are far wider
+        built = cv2.dilate(built, np.ones((3, 3), np.uint8))
+        short = np.where(np.isfinite(m), m - built, -np.inf)
+        i = int(np.argmax(short))
+        r, c = np.unravel_index(i, short.shape)
+        out[side] = {"short_mm": round(float(short[r, c]), 2),
+                     "at": (round(float(maps.x0 + c * maps.px), 1),
+                            round(float(maps.z0 + r * maps.px), 1)),
+                     "area_mm2": round(float((short > tol_mm).sum())
+                                       * maps.px ** 2, 1),
+                     "tol_mm": tol_mm}
+    return out
+
+
+# ---- legacy helpers (rectangle workflow; kept for old projects/scripts)
+
+def width_map(verts, faces, sil: Silhouette, px=0.6):
+    """Total measured width per side-view pixel. Returns (wmap, x0, z0, px)."""
+    maps = measure_maps(verts, faces, sil, px=px)
+    return maps.total, maps.x0, maps.z0, maps.px
 
 
 def suggest_width(wmap, x0, z0, px, rect=None, q=95):
@@ -208,8 +565,8 @@ def clean_mesh(verts, faces, tol=1e-3):
     faces2 = faces2[np.sort(fidx)]
     return verts2, faces2.astype(np.int64)
 
-def _box_sdf(X, Y, Z, x0, z0, x1, z1, ywidth, tilt_deg=0.0):
-    """SDF of a box drawn as a side-view rect, extruded ±ywidth/2,
+def _box_sdf(X, Y, Z, x0, z0, x1, z1, ywidth, tilt_deg=0.0, yc=0.0):
+    """SDF of a box drawn as a side-view rect, extruded yc ± ywidth/2,
     optionally tilted (rotated in the XZ plane about the rect center)."""
     cx, cz = (x0 + x1) / 2, (z0 + z1) / 2
     hx, hz = abs(x1 - x0) / 2, abs(z1 - z0) / 2
@@ -218,47 +575,70 @@ def _box_sdf(X, Y, Z, x0, z0, x1, z1, ywidth, tilt_deg=0.0):
     Xr = (X - cx) * c + (Z - cz) * s
     Zr = -(X - cx) * s + (Z - cz) * c
     d = np.maximum(np.abs(Xr) - hx, np.abs(Zr) - hz)
-    return np.maximum(d, np.abs(Y) - ywidth / 2)
+    return np.maximum(d, np.abs(Y - yc) - ywidth / 2)
 
 
-def _cyl_y_sdf(X, Y, Z, cx, cz, dia, ylen):
+def _cyl_y_sdf(X, Y, Z, cx, cz, dia, ylen, yc=0.0):
     d = np.sqrt((X - cx) ** 2 + (Z - cz) ** 2) - dia / 2
-    return np.maximum(d, np.abs(Y) - ylen / 2)
+    return np.maximum(d, np.abs(Y - yc) - ylen / 2)
 
 
 def extra_sdf(extra, X, Y, Z):
+    yc = extra.get("yc", 0.0)
     if extra["kind"] == "box":
         return _box_sdf(X, Y, Z, extra["x0"], extra["z0"], extra["x1"],
-                        extra["z1"], extra["ywidth"], extra.get("tilt_deg", 0.0))
+                        extra["z1"], extra["ywidth"],
+                        extra.get("tilt_deg", 0.0), yc)
     if extra["kind"] == "cyl_y":
         return _cyl_y_sdf(X, Y, Z, extra["x"], extra["z"],
-                          extra["dia"], extra["ylen"])
+                          extra["dia"], extra["ylen"], yc)
     raise ValueError(f"Unknown extra kind: {extra['kind']}")
 
 
 def extra_bounds(extra):
     """(x0,x1),(y0,y1),(z0,z1) world bounds of an extra."""
+    yc = extra.get("yc", 0.0)
     if extra["kind"] == "box":
         cx, cz = (extra["x0"] + extra["x1"]) / 2, (extra["z0"] + extra["z1"]) / 2
         hx = abs(extra["x1"] - extra["x0"]) / 2
         hz = abs(extra["z1"] - extra["z0"]) / 2
         r = np.hypot(hx, hz)  # conservative for tilt
         hw = extra["ywidth"] / 2
-        return (cx - r, cx + r), (-hw, hw), (cz - r, cz + r)
+        return (cx - r, cx + r), (yc - hw, yc + hw), (cz - r, cz + r)
     if extra["kind"] == "cyl_y":
         r = extra["dia"] / 2
         hw = extra["ylen"] / 2
-        return (extra["x"] - r, extra["x"] + r), (-hw, hw), \
+        return (extra["x"] - r, extra["x"] + r), (yc - hw, yc + hw), \
                (extra["z"] - r, extra["z"] + r)
     raise ValueError(extra["kind"])
 
 
-def build_solid(sil: Silhouette, base_width: float, regions, extras,
-                clearance=0.15, voxel=0.3, return_sdf=False):
+def _raster_polys(polys, xlo, zlo, voxel, nx, nz):
+    """Rasterize world-XZ polygons onto the (nx, nz) build grid."""
+    img = np.zeros((nx, nz), np.uint8)
+    conts = []
+    for poly in polys:
+        poly = np.asarray(poly, np.float64)
+        if len(poly) < 3:
+            continue
+        pp = np.empty_like(poly)
+        pp[:, 0] = (poly[:, 1] - zlo) / voxel        # col = z
+        pp[:, 1] = (poly[:, 0] - xlo) / voxel        # row = x
+        conts.append(np.round(pp).astype(np.int32))
+    if conts:
+        cv2.fillPoly(img, conts, 255)
+    return img > 0
+
+
+def build_solid(sil: Silhouette, base_thickness: float, regions, extras,
+                clearance=0.15, voxel=0.3, return_sdf=False, base_y0=0.0):
     """Build the watertight subtraction solid.
 
-    regions: list of {"x0","z0","x1","z1","width"} — later entries override
-             earlier ones where they overlap (painter's order).
+    base_thickness: the outline is extruded to this thickness, centred on
+             base_y0 (which is not 0 when the scan's mid-plane isn't).
+    regions: thickness tiers ({"kind":"tier","side","add_mm","polys"}), which
+             stack outward per side, or legacy rectangles
+             ({"x0","z0","x1","z1","width"}), which assign in list order.
     extras:  list of extra dicts (see extra_sdf).
     clearance: dilation in mm applied to the whole solid (fit clearance).
 
@@ -270,10 +650,13 @@ def build_solid(sil: Silhouette, base_width: float, regions, extras,
     poly = sil.polygon
     xlo, xhi = poly[:, 0].min(), poly[:, 0].max()
     zlo, zhi = poly[:, 1].min(), poly[:, 1].max()
-    wmax = base_width + 0.0
+    yhi, ylo = base_faces(base_thickness, base_y0)
     for r in regions:
-        wmax = max(wmax, r["width"])
-    ylo, yhi = -wmax / 2, wmax / 2
+        fR, fL = region_faces(r, base_thickness, base_y0)
+        if fR is not None:
+            yhi = max(yhi, fR)
+        if fL is not None:
+            ylo = min(ylo, fL)
     for e in extras:
         (ex0, ex1), (ey0, ey1), (ez0, ez1) = extra_bounds(e)
         xlo, xhi = min(xlo, ex0), max(xhi, ex1)
@@ -298,33 +681,50 @@ def build_solid(sil: Silhouette, base_width: float, regions, extras,
     cv2.fillPoly(img, [np.round(pp).astype(np.int32)], 255)
     d_in = cv2.distanceTransform(img, cv2.DIST_L2, 5)
     d_out = cv2.distanceTransform(255 - img, cv2.DIST_L2, 5)
-    d2 = (d_out - d_in) * voxel                  # + outside, - inside
+    d2 = ((d_out - d_in) * voxel).astype(np.float32)   # + outside, - inside
 
-    # ---- width per (x,z) cell
-    W = np.full((nx, nz), base_width, np.float32)
+    # ---- the two face surfaces, per (x,z) cell (painter's order)
+    base_R, base_L = base_faces(base_thickness, base_y0)
+    yR = np.full((nx, nz), base_R, np.float32)
+    yL = np.full((nx, nz), base_L, np.float32)
+    skipped = 0
     for r in regions:
-        i0 = np.clip(int((min(r["x0"], r["x1"]) - xlo) / voxel), 0, nx - 1)
-        i1 = np.clip(int((max(r["x0"], r["x1"]) - xlo) / voxel) + 1, 0, nx)
-        k0 = np.clip(int((min(r["z0"], r["z1"]) - zlo) / voxel), 0, nz - 1)
-        k1 = np.clip(int((max(r["z0"], r["z1"]) - zlo) / voxel) + 1, 0, nz)
-        W[i0:i1, k0:k1] = r["width"]
+        legacy = region_kind(r) == "rect"
+        if legacy:
+            mask = np.zeros((nx, nz), bool)
+            i0 = np.clip(int((min(r["x0"], r["x1"]) - xlo) / voxel), 0, nx - 1)
+            i1 = np.clip(int((max(r["x0"], r["x1"]) - xlo) / voxel) + 1, 0, nx)
+            k0 = np.clip(int((min(r["z0"], r["z1"]) - zlo) / voxel), 0, nz - 1)
+            k1 = np.clip(int((max(r["z0"], r["z1"]) - zlo) / voxel) + 1, 0, nz)
+            mask[i0:i1, k0:k1] = True
+        elif r.get("polys"):
+            mask = _raster_polys(r["polys"], xlo, zlo, voxel, nx, nz)
+        else:
+            skipped += 1                 # nothing was proud of the tier below
+            continue
+        fR, fL = region_faces(r, base_thickness, base_y0)
+        # tiers stack outward (whichever tier reaches furthest wins); legacy
+        # rectangles keep their old assign-in-order behaviour
+        if fR is not None:
+            yR[mask] = fR if legacy else np.maximum(yR[mask], fR)
+        if fL is not None:
+            yL[mask] = fL if legacy else np.minimum(yL[mask], fL)
+    np.maximum(yR, yL, out=yR)           # never let a region invert the solid
 
-    # ---- 3D SDF: frame prism = intersection(outline extrusion, |y| < w/2)
-    Yabs = np.abs(ys)[None, :, None].astype(np.float32)
-    sdf = np.maximum(d2[:, None, :].astype(np.float32),
-                     Yabs - W[:, None, :] / 2)
-
-    # ---- extras (union)
-    if extras:
-        X3 = xs[:, None, None].astype(np.float32)
-        Y3 = ys[None, :, None].astype(np.float32)
-        Z3 = zs[None, None, :].astype(np.float32)
-        for e in extras:
-            np.minimum(sdf, extra_sdf(e, X3, Y3, Z3).astype(np.float32), out=sdf)
-
-    # ---- clearance dilation
-    if clearance:
-        sdf -= clearance
+    # ---- 3D SDF, one Y slice at a time (keeps peak memory near one grid)
+    #      frame = intersection(outline extrusion, yL <= y <= yR)
+    sdf = np.empty((nx, ny, nz), np.float32)
+    X2 = xs[:, None].astype(np.float32)
+    Z2 = zs[None, :].astype(np.float32)
+    for j in range(ny):
+        yv = float(ys[j])
+        s = np.maximum(d2, yv - yR)
+        np.maximum(s, yL - yv, out=s)
+        for e in extras:                                     # union
+            np.minimum(s, extra_sdf(e, X2, yv, Z2), out=s)
+        if clearance:
+            s -= clearance                                   # fit dilation
+        sdf[:, j, :] = s
 
     # ---- seal the domain boundary so marching cubes closes the surface
     big = np.float32(10 * voxel)
@@ -351,6 +751,10 @@ def build_solid(sil: Silhouette, base_width: float, regions, extras,
     report["clearance_mm"] = clearance
     report["grid"] = (nx, ny, nz)
     report["grid_mem_mb"] = round(mem_mb, 1)
+    report["base_thickness_mm"] = float(base_thickness)
+    report["base_y0_mm"] = float(base_y0)
+    report["regions"] = len(regions)
+    report["regions_skipped"] = skipped
 
     if return_sdf:
         return verts, faces, report, (sdf, (xlo, ylo, zlo), voxel)

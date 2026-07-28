@@ -5,6 +5,9 @@ Mock frame (mm), deliberately awkward like a real scan:
   - grip block:     X -40..40, Z -60..30, width 22, hollow magwell with a
                     through-WINDOW (X -20..10, Z -40..-10) in both side walls
   - front tang:     X -85..-40, Z -10..30, width 12
+  - trigger-bar boss: X -20..25, Z 0..8, on the RIGHT side ONLY (Y 11..14),
+                    i.e. the frame is asymmetric there — 25 mm total, of
+                    which 14 is right of the mid-plane
   - vertex jitter 0.05 mm, 2% of triangles randomly dropped (scan holes)
 """
 import numpy as np
@@ -59,6 +62,9 @@ add_box(34, -11, -60, 40, 11, 30)                 # rear strap
 
 # --- front tang (width 12)
 add_box(-85, -6, -10, -40, 6, 30)
+
+# --- trigger-bar boss: right side only, sits proud of the grip's right wall
+add_box(-20, 11, 0, 25, 14, 8)
 
 V = np.asarray(V, float)
 F = np.asarray(F, np.int64)
