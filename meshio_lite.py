@@ -1,7 +1,10 @@
-"""Minimal mesh I/O: STL (binary+ASCII), OBJ, PLY (ascii + binary_little_endian).
+"""Minimal I/O: STL/OBJ/PLY in, binary STL and R12 DXF out.
 
 No external mesh libraries required — numpy only.
 Meshes are (vertices: float64 (N,3), faces: int64 (M,3)).
+
+Reading is what frame2solid needs (it loads a scan); save_stl is here for
+make_synthetic.py. The real output of the tool is DXF — see save_dxf.
 """
 from __future__ import annotations
 
@@ -310,19 +313,3 @@ def save_dxf_polyline(path, points_xy, closed=True):
     save_dxf(path, [dxf_polyline(points_xy, closed)])
 
 
-# ---------------------------------------------------------------- checks
-
-def watertight_report(verts, faces):
-    """Check that every edge is shared by exactly two triangles."""
-    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    e = np.sort(e, axis=1)
-    uniq, counts = np.unique(e, axis=0, return_counts=True)
-    boundary = int((counts == 1).sum())
-    nonmanifold = int((counts > 2).sum())
-    return {
-        "vertices": int(len(verts)),
-        "faces": int(len(faces)),
-        "boundary_edges": boundary,
-        "nonmanifold_edges": nonmanifold,
-        "watertight": boundary == 0 and nonmanifold == 0,
-    }

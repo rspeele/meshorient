@@ -10,11 +10,13 @@ Pipeline:
     scan mesh -> orient -> side-view silhouette (outer contour only, windows
     filled) -> two-sided surface maps (where the scan's left and right faces
     sit, per side-view pixel) -> thickness tiers -> extras (screw holes,
-    magazine path, ...) -> either
-        sketch_model() + export_cad()  -> DXF sketches + extrusion depths,
-                                          the lossless CAD form; or
-        build_solid()                  -> SDF voxel build -> watertight STL,
-                                          a preview / printable mesh.
+    magazine path, ...) -> sketch_model() + export_cad() -> one DXF per
+    sketch plus the extrusion depths, which is the model exactly.
+
+The output is CAD, not mesh: the tier model is a sketch-and-extrude model,
+so it goes out losslessly as 2D outlines. Downstream, OpenSCAD turns
+assembly.scad into an STL (or the finished grip) and SolveSpace/VCarve take
+the DXFs directly.
 
 The solid is NOT symmetric about Y=0. It is bounded by two independent face
 surfaces yL(x,z) <= y <= yR(x,z), built from a stack of thickness TIERS per
@@ -41,10 +43,9 @@ import os
 
 import numpy as np
 import cv2
-from skimage import measure
 
-from meshio_lite import (save_stl, save_dxf, save_dxf_polyline, dxf_polyline,
-                         dxf_circle, watertight_report)
+from meshio_lite import (save_dxf, save_dxf_polyline, dxf_polyline,
+                         dxf_circle)
 
 
 # ================================================================ orient
@@ -469,15 +470,6 @@ def _prev_offset(tiers, tier, base_thickness, base_y0=0.0):
     return prev
 
 
-def region_faces(region, base_thickness, base_y0=0.0):
-    """Face positions (yR, yL) this region assigns; None = side untouched."""
-    if region_kind(region) == "rect":
-        w = float(region["width"])
-        return base_y0 + w / 2.0, base_y0 - w / 2.0
-    fo = tier_offset(region, base_thickness, base_y0)
-    return (fo, None) if region["side"] == "right" else (None, -fo)
-
-
 def make_tier(maps: ThicknessMaps, x, z, side, base_thickness, base_y0=0.0,
               over_mm=0.3, grow_mm=0.0, add_mm=None, tiers=()):
     """Build a thickness tier from a click at world XZ.
@@ -680,233 +672,10 @@ def suggest_width(wmap, x0, z0, px, rect=None, q=95):
     return float(np.percentile(vals, q))
 
 
-# ================================================================= build
-
-def clean_mesh(verts, faces, tol=1e-3):
-    """Weld vertices closer than tol (mm), drop degenerate & duplicate faces.
-
-    Keeps the mesh robust through float32 STL round-trips and downstream
-    boolean engines.
-    """
-    key = np.round(verts / tol).astype(np.int64)
-    _, first, inv = np.unique(key.view([("", key.dtype)] * 3),
-                              return_index=True, return_inverse=True)
-    inv = inv.reshape(-1)
-    verts2 = verts[first]
-    faces2 = inv[faces]
-    ok = ((faces2[:, 0] != faces2[:, 1]) & (faces2[:, 1] != faces2[:, 2])
-          & (faces2[:, 0] != faces2[:, 2]))
-    faces2 = faces2[ok]
-    fkey = np.sort(faces2, axis=1)
-    _, fidx = np.unique(fkey.view([("", fkey.dtype)] * 3), return_index=True)
-    faces2 = faces2[np.sort(fidx)]
-    return verts2, faces2.astype(np.int64)
-
-def _box_sdf(X, Y, Z, x0, z0, x1, z1, ywidth, tilt_deg=0.0, yc=0.0):
-    """SDF of a box drawn as a side-view rect, extruded yc ± ywidth/2,
-    optionally tilted (rotated in the XZ plane about the rect center)."""
-    cx, cz = (x0 + x1) / 2, (z0 + z1) / 2
-    hx, hz = abs(x1 - x0) / 2, abs(z1 - z0) / 2
-    a = np.deg2rad(tilt_deg)
-    c, s = np.cos(a), np.sin(a)
-    Xr = (X - cx) * c + (Z - cz) * s
-    Zr = -(X - cx) * s + (Z - cz) * c
-    d = np.maximum(np.abs(Xr) - hx, np.abs(Zr) - hz)
-    return np.maximum(d, np.abs(Y - yc) - ywidth / 2)
-
-
-def _cyl_y_sdf(X, Y, Z, cx, cz, dia, ylen, yc=0.0):
-    d = np.sqrt((X - cx) ** 2 + (Z - cz) ** 2) - dia / 2
-    return np.maximum(d, np.abs(Y - yc) - ylen / 2)
-
-
-def extra_sdf(extra, X, Y, Z):
-    yc = extra.get("yc", 0.0)
-    if extra["kind"] == "box":
-        return _box_sdf(X, Y, Z, extra["x0"], extra["z0"], extra["x1"],
-                        extra["z1"], extra["ywidth"],
-                        extra.get("tilt_deg", 0.0), yc)
-    if extra["kind"] == "cyl_y":
-        return _cyl_y_sdf(X, Y, Z, extra["x"], extra["z"],
-                          extra["dia"], extra["ylen"], yc)
-    raise ValueError(f"Unknown extra kind: {extra['kind']}")
-
-
-def extra_bounds(extra):
-    """(x0,x1),(y0,y1),(z0,z1) world bounds of an extra."""
-    yc = extra.get("yc", 0.0)
-    if extra["kind"] == "box":
-        cx, cz = (extra["x0"] + extra["x1"]) / 2, (extra["z0"] + extra["z1"]) / 2
-        hx = abs(extra["x1"] - extra["x0"]) / 2
-        hz = abs(extra["z1"] - extra["z0"]) / 2
-        r = np.hypot(hx, hz)  # conservative for tilt
-        hw = extra["ywidth"] / 2
-        return (cx - r, cx + r), (yc - hw, yc + hw), (cz - r, cz + r)
-    if extra["kind"] == "cyl_y":
-        r = extra["dia"] / 2
-        hw = extra["ylen"] / 2
-        return (extra["x"] - r, extra["x"] + r), (yc - hw, yc + hw), \
-               (extra["z"] - r, extra["z"] + r)
-    raise ValueError(extra["kind"])
-
-
-def _raster_polys(polys, xlo, zlo, voxel, nx, nz):
-    """Rasterize world-XZ polygons onto the (nx, nz) build grid."""
-    img = np.zeros((nx, nz), np.uint8)
-    conts = []
-    for poly in polys:
-        poly = np.asarray(poly, np.float64)
-        if len(poly) < 3:
-            continue
-        pp = np.empty_like(poly)
-        pp[:, 0] = (poly[:, 1] - zlo) / voxel        # col = z
-        pp[:, 1] = (poly[:, 0] - xlo) / voxel        # row = x
-        conts.append(np.round(pp).astype(np.int32))
-    if conts:
-        cv2.fillPoly(img, conts, 255)
-    return img > 0
-
-
-def build_solid(sil: Silhouette, base_thickness: float, regions, extras,
-                clearance=0.15, voxel=0.3, return_sdf=False, base_y0=0.0):
-    """Build the watertight subtraction solid.
-
-    base_thickness: the outline is extruded to this thickness, centred on
-             base_y0 (which is not 0 when the scan's mid-plane isn't).
-    regions: thickness tiers ({"kind":"tier","side","add_mm","polys"}), which
-             stack outward per side, or legacy rectangles
-             ({"x0","z0","x1","z1","width"}), which assign in list order.
-    extras:  list of extra dicts (see extra_sdf).
-    clearance: dilation in mm applied to the whole solid (fit clearance).
-
-    Returns (verts, faces, report[, sdf_pack]).
-    """
-    pad = clearance + 3 * voxel + 1.0
-
-    # ---- bounds
-    poly = sil.polygon
-    xlo, xhi = poly[:, 0].min(), poly[:, 0].max()
-    zlo, zhi = poly[:, 1].min(), poly[:, 1].max()
-    yhi, ylo = base_faces(base_thickness, base_y0)
-    for r in regions:
-        fR, fL = region_faces(r, base_thickness, base_y0)
-        if fR is not None:
-            yhi = max(yhi, fR)
-        if fL is not None:
-            ylo = min(ylo, fL)
-    for e in extras:
-        (ex0, ex1), (ey0, ey1), (ez0, ez1) = extra_bounds(e)
-        xlo, xhi = min(xlo, ex0), max(xhi, ex1)
-        ylo, yhi = min(ylo, ey0), max(yhi, ey1)
-        zlo, zhi = min(zlo, ez0), max(zhi, ez1)
-    xlo, xhi = xlo - pad, xhi + pad
-    ylo, yhi = ylo - pad, yhi + pad
-    zlo, zhi = zlo - pad, zhi + pad
-
-    xs = np.arange(xlo, xhi + voxel, voxel)
-    ys = np.arange(ylo, yhi + voxel, voxel)
-    zs = np.arange(zlo, zhi + voxel, voxel)
-    nx, ny, nz = len(xs), len(ys), len(zs)
-    mem_mb = nx * ny * nz * 4 / 1e6
-
-    # ---- 2D signed distance to silhouette polygon, on the (x,z) build grid
-    # raster: rows = x index, cols = z index  (so d2[ix, iz])
-    img = np.zeros((nx, nz), np.uint8)
-    pp = np.empty((len(poly), 2), np.float64)
-    pp[:, 0] = (poly[:, 1] - zlo) / voxel        # col = z
-    pp[:, 1] = (poly[:, 0] - xlo) / voxel        # row = x
-    cv2.fillPoly(img, [np.round(pp).astype(np.int32)], 255)
-    d_in = cv2.distanceTransform(img, cv2.DIST_L2, 5)
-    d_out = cv2.distanceTransform(255 - img, cv2.DIST_L2, 5)
-    d2 = ((d_out - d_in) * voxel).astype(np.float32)   # + outside, - inside
-
-    # ---- the two face surfaces, per (x,z) cell (painter's order)
-    base_R, base_L = base_faces(base_thickness, base_y0)
-    yR = np.full((nx, nz), base_R, np.float32)
-    yL = np.full((nx, nz), base_L, np.float32)
-    skipped = 0
-    for r in regions:
-        legacy = region_kind(r) == "rect"
-        if legacy:
-            mask = np.zeros((nx, nz), bool)
-            i0 = np.clip(int((min(r["x0"], r["x1"]) - xlo) / voxel), 0, nx - 1)
-            i1 = np.clip(int((max(r["x0"], r["x1"]) - xlo) / voxel) + 1, 0, nx)
-            k0 = np.clip(int((min(r["z0"], r["z1"]) - zlo) / voxel), 0, nz - 1)
-            k1 = np.clip(int((max(r["z0"], r["z1"]) - zlo) / voxel) + 1, 0, nz)
-            mask[i0:i1, k0:k1] = True
-        elif r.get("polys"):
-            mask = _raster_polys(r["polys"], xlo, zlo, voxel, nx, nz)
-        else:
-            skipped += 1                 # nothing was proud of the tier below
-            continue
-        fR, fL = region_faces(r, base_thickness, base_y0)
-        # tiers stack outward (whichever tier reaches furthest wins); legacy
-        # rectangles keep their old assign-in-order behaviour
-        if fR is not None:
-            yR[mask] = fR if legacy else np.maximum(yR[mask], fR)
-        if fL is not None:
-            yL[mask] = fL if legacy else np.minimum(yL[mask], fL)
-    np.maximum(yR, yL, out=yR)           # never let a region invert the solid
-
-    # ---- 3D SDF, one Y slice at a time (keeps peak memory near one grid)
-    #      frame = intersection(outline extrusion, yL <= y <= yR)
-    sdf = np.empty((nx, ny, nz), np.float32)
-    X2 = xs[:, None].astype(np.float32)
-    Z2 = zs[None, :].astype(np.float32)
-    for j in range(ny):
-        yv = float(ys[j])
-        s = np.maximum(d2, yv - yR)
-        np.maximum(s, yL - yv, out=s)
-        for e in extras:                                     # union
-            np.minimum(s, extra_sdf(e, X2, yv, Z2), out=s)
-        if clearance:
-            s -= clearance                                   # fit dilation
-        sdf[:, j, :] = s
-
-    # ---- seal the domain boundary so marching cubes closes the surface
-    big = np.float32(10 * voxel)
-    sdf[0, :, :] = big; sdf[-1, :, :] = big
-    sdf[:, 0, :] = big; sdf[:, -1, :] = big
-    sdf[:, :, 0] = big; sdf[:, :, -1] = big
-
-    verts, faces, _, _ = measure.marching_cubes(sdf, level=0.0,
-                                                spacing=(voxel, voxel, voxel))
-    verts = verts + np.array([xlo, ylo, zlo])
-    faces = faces.astype(np.int64)
-    verts, faces = clean_mesh(verts, faces)
-
-    # ---- outward orientation (positive volume)
-    v = verts[faces]
-    vol6 = np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])).sum()
-    if vol6 < 0:
-        faces = faces[:, ::-1]
-        vol6 = -vol6
-
-    report = watertight_report(verts, faces)
-    report["volume_cm3"] = float(vol6 / 6.0 / 1000.0)
-    report["voxel_mm"] = voxel
-    report["clearance_mm"] = clearance
-    report["grid"] = (nx, ny, nz)
-    report["grid_mem_mb"] = round(mem_mb, 1)
-    report["base_thickness_mm"] = float(base_thickness)
-    report["base_y0_mm"] = float(base_y0)
-    report["regions"] = len(regions)
-    report["regions_skipped"] = skipped
-
-    if return_sdf:
-        return verts, faces, report, (sdf, (xlo, ylo, zlo), voxel)
-    return verts, faces, report
-
-
-def save_solid(path, verts, faces):
-    save_stl(path, verts, faces)
-
-
 # ============================================================ CAD export
 #
 # The tier model IS a sketch-and-extrude model: a handful of closed outlines,
-# each extruded a known distance along Y. That exports losslessly to DXF,
-# unlike the voxel build (which is a mesh preview / print-ready STL).
+# each extruded a known distance along Y. That exports losslessly to DXF.
 
 def _grow_loops(loops, mm, simplify_mm=0.1):
     """Minkowski-grow closed loops by mm (rasterised; mm <= 0 is a no-op)."""
@@ -1096,9 +865,10 @@ def export_cad(folder, model, meta=None):
         f.write("\n".join(L))
     written.append(p)
 
-    # ---- OpenSCAD assembly (exact geometry, unlike the voxel STL)
+    # ---- OpenSCAD assembly: the model rebuilt exactly, and the
+    #      quickest route to an STL if you want one
     S = ["// frame2solid - subtraction solid, rebuilt from the exported",
-         "// sketches. Exact geometry: no voxels involved.",
+         "// sketches. Render this to get an STL.",
          "// X = bore, Y = across the frame, Z = vertical. Units mm.",
          "$fn = 64;", "",
          "module sketch(file, y_lo, y_hi) {",
@@ -1130,27 +900,3 @@ def export_cad(folder, model, meta=None):
     with open(stamp, "w", encoding="utf-8") as f:
         f.write("\n".join(names) + "\n")
     return written
-
-
-# ------------------------------------------------------------- previews
-
-def sdf_slice_y(sdf_pack, y_mm=0.0):
-    """Cross-section mask at a given Y (for preview). Returns (mask, extent)
-    with extent = (xmin, xmax, zmin, zmax) for imshow."""
-    sdf, (xlo, ylo, zlo), voxel = sdf_pack
-    iy = int(round((y_mm - ylo) / voxel))
-    iy = np.clip(iy, 0, sdf.shape[1] - 1)
-    m = (sdf[:, iy, :] < 0)          # (nx, nz)
-    extent = (xlo, xlo + voxel * sdf.shape[0], zlo, zlo + voxel * sdf.shape[2])
-    return m, extent
-
-
-def sdf_slice_x(sdf_pack, x_mm):
-    """Cross-section at a given X station: returns (mask (ny,nz), extent
-    (ymin,ymax,zmin,zmax))."""
-    sdf, (xlo, ylo, zlo), voxel = sdf_pack
-    ix = int(round((x_mm - xlo) / voxel))
-    ix = np.clip(ix, 0, sdf.shape[0] - 1)
-    m = (sdf[ix, :, :] < 0)
-    extent = (ylo, ylo + voxel * sdf.shape[1], zlo, zlo + voxel * sdf.shape[2])
-    return m, extent

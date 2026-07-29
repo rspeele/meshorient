@@ -6,7 +6,8 @@ transplanted grip. Fills magwell windows and pin holes automatically, rebuilds
 the frame as a stack of flat **thickness tiers, independently per side** (so a
 trigger-bar relief on the right doesn't fatten the left), lets you add
 clearance solids (magazine path, grip screws, levers), applies a fit-clearance
-offset, and exports a guaranteed-watertight STL.
+offset, and exports the result as CAD: one DXF per sketch plus the extrusion
+table and a ready-to-run OpenSCAD assembly.
 
 ## Install (Windows)
 
@@ -16,7 +17,8 @@ offset, and exports a guaranteed-watertight STL.
        pip install -r requirements.txt
        python app.py
 
-The GUI needs no other software. Try it first with the included
+Three wheels, no mesh stack (numpy, opencv-python, matplotlib). Try it first
+with the included
 `synthetic_frame_scan.stl` (a mock frame with a magwell window, three
 thicknesses and a right-side-only boss) — the default scan path points at it.
 
@@ -123,29 +125,23 @@ The text boxes edit the **last** extra added. Everything here gets unioned
 with the frame before subtraction, so nothing you build later can block a
 magazine or bury a screw.
 
-**6 · Build & export.** Two ways out, from the same tier model:
+**6 · Export.** The tier model *is* a sketch-and-extrude model, so it goes
+out losslessly as CAD. The view lists every sketch and its Y range — a last
+look at what's about to be written. **EXPORT CAD** writes `<name>_cad/`:
 
-**Export CAD (DXF)** is the one to reach for. The tier model *is* a
-sketch-and-extrude model, so it exports losslessly: one DXF per sketch (base
-outline, each tier, each extra) into `<out>_cad/`, plus `all_sketches.dxf`
-with one layer per sketch if you'd rather import once. `build.txt` is the
-build sheet — the exact Y range and depth for every sketch. Every tier
-extrudes from the *same* plane (`y0`), so in SolveSpace they share one
-workplane and differ only in depth and direction. Import, tweak the outlines
-by hand — which is the point — extrude, union. `assembly.scad` does the whole
-thing already if you'd rather drive it from OpenSCAD, and includes the
-`difference()` against your donor grip, commented out. The `clearance` value
-is grown into the outlines and depths; set it to 0 for nominal geometry.
-This needs no build — it works straight off step 4.
+- one DXF per sketch (base outline, each tier, each extra),
+- `all_sketches.dxf`, one layer per sketch, if you'd rather import once,
+- `build.txt` — the build sheet, with the exact Y range and depth per sketch,
+- `assembly.scad` — the whole model rebuilt in OpenSCAD, with the
+  `difference()` against your donor grip commented out at the bottom.
 
-**BUILD solid** is the voxel signed-distance-field path: outline extruded to
-the tier stack on each side, extras unioned, everything dilated by
-`clearance`, then meshed. Use it as a preview (the section slider) and for a
-quick printable STL; it can't produce a broken boolean — the output is
-checked and reported watertight — but it's a mesh, not CAD. Inspect side- and
-cross-sections with the slider, then Save STL. Voxel 0.3 mm is a good preview;
-0.15–0.2 mm for the final (watch the grid-memory readout — halving voxel size
-≈ 8× the RAM).
+Every tier extrudes from the *same* plane (`y0`), so in SolveSpace they share
+one workplane and differ only in depth and direction. Import, tweak the
+outlines by hand — which is the point — extrude, union.
+
+`clearance` is grown into the outlines and the depths, so what comes out is
+the finished subtraction solid; set it to 0 for nominal geometry. The DXFs
+use only `LINE` and `CIRCLE` entities, which every importer accepts.
 
 "Save project" stores everything (orientation, regions, extras, parameters) in
 a JSON you can reload later or start from for the next scan of the same frame:
@@ -153,18 +149,19 @@ a JSON you can reload later or start from for the next scan of the same frame:
 
 ## Using the output
 
-**Via CAD (preferred).** Take `<out>_cad/` into SolveSpace, adjust the
+**SolveSpace / VCarve.** Take `<name>_cad/` into SolveSpace, adjust the
 outlines where the scan was ropey, extrude per `build.txt`, and you have a
-real parametric model you can revise later. Or open `assembly.scad` in
-OpenSCAD (Manifold backend), uncomment the `difference()` at the bottom and
-point it at your donor grip — exact geometry, no voxels, seconds to run.
+real parametric model you can revise later. The same DXFs are carvable
+profiles for VCarve.
 
-**Via mesh.** Subtract `frame_solid.stl` from your donor grip mesh:
+**OpenSCAD.** Open `assembly.scad` (Manifold backend), uncomment the
+`difference()` at the bottom and point it at your donor grip — exact
+geometry, seconds to run. That is also the quickest way to an STL, whether
+you want to eyeball the subtraction solid or print a fit prototype: render
+and export.
 
-- **Blender 4.5+**: Boolean modifier, Difference, solver "Manifold" (both
-  meshes watertight — this tool guarantees its half).
-- MeshMixer's boolean will usually cope too, since the hard part (a clean
-  subtraction solid) is already done — but Blender is faster and stricter.
+**Blender** is still fine if you'd rather boolean meshes — export the STL
+from OpenSCAD first, then Boolean modifier, Difference, solver "Manifold".
 
 Clearance guidance: the `clearance` parameter is per-side. ~0.10–0.20 mm for
 FDM prints, ~0.05–0.10 mm for CNC hardwood plus finish allowance. Print a

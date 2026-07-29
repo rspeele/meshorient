@@ -204,37 +204,8 @@ extras = [
      "ywidth": 20.0, "tilt_deg": 8.0},                                # mag path
 ]
 
-# ---- build
+# ---- CAD: the model as sketches + extrusion depths, which IS the output
 CLEAR = 0.15
-bverts, bfaces, report, sdf_pack = core.build_solid(
-    sil, base, regions, extras, clearance=CLEAR, voxel=0.3, return_sdf=True,
-    base_y0=base_y0)
-print("report:", report)
-assert report["watertight"], "output must be watertight"
-assert report["regions_skipped"] == 0
-
-
-# ---- verify the built faces, per side
-def faces_at(v, xlo, xhi, zlo, zhi):
-    m = (v[:, 0] > xlo) & (v[:, 0] < xhi) & (v[:, 2] > zlo) & (v[:, 2] < zhi)
-    return v[m][:, 1].min(), v[m][:, 1].max()
-
-
-for name, box, exp_l, exp_r in [
-        ("rail", (-10, 10, 38, 44), -13.0, 13.0),      # tier 2 both sides
-        ("grip", (15, 30, -50, -30), -11.0, 11.0),     # tier 1 both sides
-        ("tang", (-75, -60, 5, 20), -6.0, 6.0),        # base tier
-        ("boss", (-5, 5, 3, 5), -11.0, 14.0)]:         # tier 3, RIGHT ONLY
-    lo, hi = faces_at(bverts, *box)
-    print(f"output {name}: y {lo:+.2f} .. {hi:+.2f}  "
-          f"(expect {exp_l - CLEAR:+.2f} .. {exp_r + CLEAR:+.2f})")
-    assert abs(lo - (exp_l - CLEAR)) < 0.35, name
-    assert abs(hi - (exp_r + CLEAR)) < 0.35, name
-
-core.save_solid("frame_solid.stl", bverts, bfaces)
-print("saved frame_solid.stl")
-
-# ---- CAD export: the same model as sketches + extrusion depths
 model = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
                           clearance=CLEAR)
 assert len(model) == 1 + len(tiers) + len(extras)
@@ -262,7 +233,7 @@ assert all(poly_g.contains_point(p) for p in n_boss["loops"][0]), \
     "clearance must grow the outline outward"
 
 
-# the exported sketches must describe the SAME solid as the voxel build
+# the exported sketches must describe the solid we asked for
 def cad_faces_at(model, x, z):
     """Y range of the union of the extruded sketches at a point."""
     lo, hi = np.inf, -np.inf
@@ -340,15 +311,39 @@ for i, r in enumerate(t for t in tiers if t["side"] == "right"):
 ax.set_title(f"4. RIGHT-side tier stack (base {base:.1f} mm)")
 
 ax = axes[1, 1]
-m, sex = core.sdf_slice_y(sdf_pack, 12.5)
-ax.imshow(m.T, origin="lower", extent=(sex[0], sex[1], sex[2], sex[3]),
-          cmap="gray")
-ax.set_title("5. Section at Y=+12.5 (rail + boss only reach this far right)")
+for sk in model:
+    c = {"base": "0.4", "left": "tab:blue", "right": "tab:red",
+         "extra": "tab:green"}.get(sk.get("side", sk["kind"]), "tab:orange")
+    for loop in sk["loops"]:
+        ax.add_patch(plt.Polygon(np.asarray(loop), closed=True, fill=False,
+                                 ec=c, lw=1.4))
+    if "circle" in sk:
+        ax.add_patch(plt.Circle(sk["circle"][:2], sk["circle"][2], fill=False,
+                                ec=c, lw=1.4))
+ax.autoscale_view()
+ax.set_title(f"5. The {len(model)} exported sketches (grey base, blue L, red R)")
+
+
+def cad_section_x(model, x, ys, zs):
+    """Y-Z cross-section of the extruded sketches."""
+    img = np.zeros((len(zs), len(ys)), bool)
+    probe = np.column_stack([np.full_like(zs, x), zs])
+    for sk in model:
+        hit = np.zeros(len(zs), bool)
+        for loop in sk["loops"]:
+            hit |= _Path(np.asarray(loop)).contains_points(probe)
+        if "circle" in sk:
+            cx, cz, rr = sk["circle"]
+            hit |= np.hypot(x - cx, zs - cz) <= rr
+        img |= hit[:, None] & ((ys >= sk["y_lo"]) & (ys <= sk["y_hi"]))[None, :]
+    return img
+
 
 ax = axes[1, 2]
-m, sex = core.sdf_slice_x(sdf_pack, 5.0)
-ax.imshow(m.T, origin="lower", extent=(sex[0], sex[1], sex[2], sex[3]),
-          cmap="gray")
+ys = np.linspace(-20, 20, 400)
+zs = np.linspace(sil.polygon[:, 1].min(), sil.polygon[:, 1].max(), 500)
+ax.imshow(cad_section_x(model, 5.0, ys, zs), origin="lower",
+          extent=(ys[0], ys[-1], zs[0], zs[-1]), cmap="gray")
 ax.set_aspect("equal")
 ax.axvline(0, color="tab:red", lw=0.8)
 ax.set_title("6. Cross-section at X=5 (asymmetric: boss on +Y)")

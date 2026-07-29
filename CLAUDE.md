@@ -3,12 +3,13 @@
 ## What this is
 
 A Python GUI tool that converts a 3D scan of a pistol frame into a clean,
-watertight "subtraction solid" for grip transplant projects: the user scans a
+"subtraction solid" for grip transplant projects: the user scans a
 donor grip (e.g. Glock) and a host frame (e.g. Sako Triace / Pardini target
 pistol), and boolean-subtracts the solid this tool produces from the donor
 grip exterior to get a grip that fits the host frame. Downstream tools:
-MeshMixer (registration, clamshell splitting), Blender/OpenSCAD (the boolean),
-VCarve (CNC), FDM printing for fit prototypes.
+MeshMixer (registration, clamshell splitting), OpenSCAD (the boolean and
+the STL), SolveSpace (editing the exported profiles), VCarve (CNC), FDM
+printing for fit prototypes.
 
 ## Architecture & key decisions
 
@@ -18,42 +19,38 @@ VCarve (CNC), FDM printing for fit prototypes.
   widgets (NOT tkinter) were chosen so the GUI is testable headless with the
   Agg backend; on Windows it runs on the default TkAgg backend.
 - `meshio_lite.py` — self-contained STL/OBJ/PLY read, binary STL + R12 DXF
-  write, watertightness check. No trimesh (deliberate). The DXF writer emits
-  ONLY `LINE` and `CIRCLE`: closed outlines go out as rings of segments.
-  This is not an aesthetic choice — OpenSCAD rejects R12
-  POLYLINE/VERTEX/SEQEND outright ("Unsupported DXF Entity", confirmed by
-  the user), and LWPOLYLINE would mean an R13+ file with entity handles.
-  OpenSCAD restitches coincident endpoints into closed paths and SolveSpace
-  explodes polylines into segments on import, so neither loses anything.
-  Do not "tidy" this back into polylines.
-- Dependencies are ONLY numpy/scipy/scikit-image/opencv-python/matplotlib
-  (see requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely
-  without discussing — the constraint was plain pip wheels, no mesh stack.
-- There are TWO outputs from the same tier model, and the CAD one is the
-  primary one for the user's workflow:
-  - `sketch_model()` + `export_cad()` — the tier model IS a sketch-and-
-    extrude model, so it exports losslessly as one DXF per sketch (base
-    outline, each tier, each extra) + `all_sketches.dxf` (one layer each) +
-    `build.txt` (the extrusion table) + `assembly.scad` (OpenSCAD rebuild,
-    exact geometry, with the donor-grip `difference()` commented in). Every
-    tier extrudes from the same plane y=base_y0 so CAD needs one workplane.
-    Needs no voxel build — it works straight off step 4. `clearance` is
-    grown into the outlines (rasterised Minkowski) and the depths.
-  - the voxel build below, which is a preview + printable STL.
-- Geometry engine (for the STL) is a voxel signed-distance field, not mesh
-  booleans:
-  - side-view outer silhouette (cv2 RETR_EXTERNAL) auto-fills magwell
-    windows/pin holes — this is a core feature, keep it;
-  - the solid is TWO-SIDED: bounded by two independent face surfaces
-    yL(x,z) <= y <= yR(x,z), built from a stack of THICKNESS TIERS per side
-    (see below). Not symmetric about Y=0;
-  - extras (clearance solids: tilted boxes for magazine path, Y-cylinders
-    for grip screws) are analytic SDFs unioned in (np.minimum); each has a
-    `yc` mid-offset so it can sit on one side only;
-  - fit clearance = subtract constant from SDF (per-side dilation);
-  - skimage marching_cubes at level 0, then clean_mesh() (weld @1e-3 mm,
-    drop degenerate/dup faces — REQUIRED for STL float32 round-trip to stay
-    watertight; this was a real bug).
+  write. No trimesh (deliberate). The DXF writer emits ONLY `LINE` and
+  `CIRCLE`: closed outlines go out as rings of segments. This is not an
+  aesthetic choice — OpenSCAD rejects R12 POLYLINE/VERTEX/SEQEND outright
+  ("Unsupported DXF Entity", confirmed by the user), and LWPOLYLINE would
+  mean an R13+ file with entity handles. OpenSCAD restitches coincident
+  endpoints into closed paths and SolveSpace explodes polylines into
+  segments on import, so neither loses anything. Do not "tidy" this back
+  into polylines. save_stl is only there for make_synthetic.py.
+- Dependencies are ONLY numpy/opencv-python/matplotlib (see
+  requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely without
+  discussing — the constraint was plain pip wheels, no mesh stack. scipy and
+  scikit-image went out with the voxel build; keep it that way.
+- The output is CAD, not mesh. `sketch_model()` + `export_cad()`: the tier
+  model IS a sketch-and-extrude model, so it exports losslessly as one DXF
+  per sketch (base outline, each tier, each extra) + `all_sketches.dxf` (one
+  layer each) + `build.txt` (the extrusion table) + `assembly.scad`
+  (OpenSCAD rebuild, exact geometry, with the donor-grip `difference()`
+  commented in). Every tier extrudes from the same plane y=base_y0, so CAD
+  needs one workplane. `clearance` is grown into the outlines (rasterised
+  Minkowski) and the depths.
+  There WAS a voxel SDF build (build_solid + marching cubes -> STL). It was
+  removed once the CAD export was exact: OpenSCAD renders assembly.scad to
+  an STL far better than a voxel grid could, and the DXFs are what
+  SolveSpace and VCarve want. Do not bring it back — if you need a preview,
+  extrude the sketches, do not re-raster the model.
+- The silhouette (cv2 RETR_EXTERNAL) auto-fills magwell windows/pin holes —
+  this is a core feature, keep it.
+- The solid is TWO-SIDED: bounded by two independent face surfaces
+  yL(x,z) <= y <= yR(x,z), built from a stack of THICKNESS TIERS per side
+  (see below). Not symmetric about Y=0. Extras (tilted boxes for the
+  magazine path, Y-cylinders for grip screws) each carry a `yc` mid-offset
+  so they can sit on one side only.
 - The Level step (2) exists because PCA leaves a few tenths of a degree of
   tilt, and that alone makes one end of a flat side measure thicker than the
   other — which the two-sided tier model then bakes in. The user clicks 3+
@@ -109,8 +106,6 @@ VCarve (CNC), FDM printing for fit prototypes.
 - Coordinate convention everywhere: X = bore/length, Y = across frame
   (mid-plane near Y=0, but the solid is NOT symmetric about it), Z =
   vertical. Side view = XZ. Units mm.
-- SDF grid memory scales (1/voxel)^3; report includes grid_mem_mb. 0.3 mm
-  preview, 0.15–0.2 mm final.
 
 ## GUI gotchas (learned the hard way)
 
@@ -154,17 +149,18 @@ VCarve (CNC), FDM printing for fit prototypes.
   faces).
 - `python test_pipeline.py` — end-to-end core test with assertions (window
   filled, tier heights ±0.4 mm, tiers nest, interior holes swallowed,
-  coverage clean and correctly flagging a missing tier, output watertight,
-  built faces per side within 0.35 mm incl. clearance, and the CAD export
-  reproducing those same faces from its sketches + DXF round-trip) +
-  pipeline_preview.png.
+  coverage clean and correctly flagging a missing tier, a tier sharing the
+  frame's edge exactly where it reaches it, the exported sketches giving the
+  right per-side faces within 0.35 mm incl. clearance, and the DXFs reading
+  back as the same closed loops using only LINE/CIRCLE) + pipeline_preview.png.
 - `python test_gui.py` — drives the GUI headless (Agg), screenshots each
   step, asserts levelling recovers a deliberately introduced 1.3° tilt
   (and Undo puts it back), tier stacking order, per-side views drawing only
   their own tiers, selection/edit/delete of any tier (not just the last),
   that edits do nothing until Apply, that the busy badge is up *during* the
-  re-cut, the asymmetric built faces, build watertight, STL round-trip,
-  project JSON round-trip, and that legacy rectangle projects still build.
+  re-cut, the CAD export writing every sketch without needing anything
+  else, project JSON round-trip, and that legacy rectangle projects still
+  export.
 - Run both after ANY change to core.py or app.py. There is also a click-
   routing regression concern: clicking "Extract silhouette" in step 3 must NOT
   trigger step 1's Browse dialog (overlapping hidden widgets).

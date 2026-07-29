@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import numpy as np
 import app as appmod
 import core
-from meshio_lite import load_mesh, watertight_report
+
 
 a = appmod.App()
 
@@ -213,12 +213,10 @@ a.add_extra_cyl(55, zmax - 75)
 assert a.extras[-1]["yc"] == 0.0
 a.fig.savefig("gui_step5_extras.png", dpi=100)
 
-# --- step 6: CAD export (must not need a voxel build first)
-a._set_step(appmod.S_BUILD)
-a.tb_vox.set_val("0.35")
+# --- step 6: CAD export — the tool's actual output
+a._set_step(appmod.S_EXPORT)
 a.tb_clr.set_val("0.15")
-a.tb_out.set_val("gui_frame_solid.stl")
-assert a.result is None
+a.tb_out.set_val("gui_frame_solid")
 a._on_export_cad(None)
 cad = "gui_frame_solid_cad"
 assert os.path.isdir(cad)
@@ -229,36 +227,9 @@ assert len(dxfs) == 1 + 5 + 2 + 1, dxfs      # base + tiers + extras + combined
 sheet = open(os.path.join(cad, "build.txt"), encoding="utf-8").read()
 assert "R3_plus" in sheet and "clearance     : 0.15" in sheet
 print("CAD export OK:", sorted(os.listdir(cad)))
-
-# --- step 6: build + save
-a._on_build(None)
-assert a.result is not None
-bverts, _, rep, _ = a.result
-print("build report:", rep)
-assert rep["watertight"]
-assert rep["regions_skipped"] == 0
-
-# the boss must come out one-sided: right face pushed out, left face at the
-# grip tier
-m = ((bverts[:, 0] > -5) & (bverts[:, 0] < 5)
-     & (bverts[:, 2] > Z(3)) & (bverts[:, 2] < Z(5)))
-lo, hi = bverts[m][:, 1].min(), bverts[m][:, 1].max()
-print(f"boss faces in the built solid: {lo:+.2f} .. {hi:+.2f} "
-      f"(expect ~-11.65 .. +13.65)")
-assert abs(lo - (-11.5 - 0.15)) < 0.35
-assert abs(hi - (13.5 + 0.15)) < 0.35
-a.fig.savefig("gui_step6_build.png", dpi=100)
-
-# section radio + slider redraws
-a.sl_sec.set_val(0.4)
-a.fig.savefig("gui_step6_build_section.png", dpi=100)
-
-a._on_save(None)
-
-# verify saved STL round-trips watertight
-v, f = load_mesh("gui_frame_solid.stl")
-print("saved STL:", watertight_report(v, f))
-assert watertight_report(v, f)["watertight"]
+# the export step previews every sketch it is about to write
+assert a.model is not None and len(a.model) == 1 + 5 + 2
+a.fig.savefig("gui_step6_export.png", dpi=100)
 
 # --- project save/load round trip
 a.tb_proj.set_val("test_project.json")
@@ -272,11 +243,11 @@ assert all(t.get("polys") for t in b.regions), "outlines must survive the JSON"
 assert b.orig_verts is not None
 b._on_extract(None)
 assert b.sil is not None
-# a reloaded project rebuilds to the same thing without re-measuring
-b._set_step(appmod.S_BUILD)
-b.tb_vox.set_val("0.35")
-b._on_build(None)
-assert b.result is not None and b.result[2]["watertight"]
+# a reloaded project re-exports without re-measuring anything
+b._set_step(appmod.S_EXPORT)
+b.tb_out.set_val("gui_reload")
+b._on_export_cad(None)
+assert os.path.isfile(os.path.join("gui_reload_cad", "build.txt"))
 print("project round-trip OK")
 
 # --- legacy projects (drag-rectangle regions) still load and build
@@ -286,9 +257,9 @@ legacy._on_proj_load(None)
 assert legacy.base_thickness and legacy.regions
 assert core.region_kind(legacy.regions[0]) == "rect"
 legacy._on_extract(None)
-legacy.tb_vox.set_val("0.5")
-legacy._on_build(None)
-assert legacy.result is not None and legacy.result[2]["watertight"]
+legacy.tb_out.set_val("gui_legacy")
+legacy._on_export_cad(None)
+assert os.path.isfile(os.path.join("gui_legacy_cad", "build.txt"))
 print("legacy rectangle project OK")
 
 print("ALL GUI TESTS PASSED")

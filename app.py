@@ -1,5 +1,5 @@
-"""frame2solid — GUI for turning a pistol-frame scan into a clean,
-watertight 'subtraction solid' for grip transplants.
+"""frame2solid — GUI for turning a pistol-frame scan into the CAD sketches
+of a 'subtraction solid' for grip transplants.
 
 Run:  python app.py            (optionally: python app.py myproject.json)
 
@@ -29,11 +29,11 @@ Steps (radio buttons, top right):
                   click = Y-cylinder (grip screws, pins). Dims via text boxes
                   (they edit the LAST extra); y-mid offsets it off the
                   centreline for one-sided reliefs.
-  6 Build       — two ways out of the same tier model. "Export CAD (DXF)"
-                  writes the sketches and their extrusion depths for
-                  SolveSpace/OpenSCAD (no build needed — this is the lossless
-                  one). "BUILD solid" is the voxel SDF preview and printable
-                  watertight STL; inspect cross-sections with the slider.
+  6 Export      — write the model out: one DXF per sketch plus the
+                  extrusion table and an OpenSCAD assembly. The view shows
+                  every outline that will be written and its Y range.
+                  Downstream, OpenSCAD makes the STL (or the finished grip)
+                  and SolveSpace/VCarve take the DXFs directly.
 """
 from __future__ import annotations
 
@@ -47,15 +47,15 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
 from matplotlib.widgets import (Button, TextBox, RadioButtons,
-                                RectangleSelector, Slider)
+                                RectangleSelector)
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 
 import core
-from meshio_lite import load_mesh, save_stl
+from meshio_lite import load_mesh
 
 STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Extras",
-         "6 Build"]
-S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXTRAS, S_BUILD = range(len(STEPS))
+         "6 Export"]
+S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXTRAS, S_EXPORT = range(len(STEPS))
 SIDE_KEYS = ["left", "right"]
 SIDE_TAG = {"left": "L ", "right": " R"}
 
@@ -192,7 +192,7 @@ class App:
         self.regions = []
         self.sel = None               # index of the selected region
         self.extras = []
-        self.result = None            # (verts, faces, report, sdf_pack)
+        self.model = None             # cached sketch model for export
         self.step = 0
         self.extra_kind = "box (drag)"
         self._radio_guard = False
@@ -401,39 +401,20 @@ class App:
         self.w4 += [self.bt_edel, self.bt_eclr]
 
         self._wy = 0.745
-        # ---------- step 6 widgets (Build)
-        self.w5 = self.w_build = []
-        r = slot(split=(0.67, 0.10))
-        self.tb_vox = TextBox(self.fig.add_axes(r), "voxel ", initial="0.3")
-        self.tb_clr = TextBox(self.fig.add_axes([0.85, r[1], 0.10, r[3]]),
-                              "clearance ", initial="0.15")
-        self.w5 += [self.tb_vox, self.tb_clr]
+        # ---------- step 6 widgets (Export)
+        self.w5 = self.w_export = []
+        r = slot(split=(0.78, 0.10))
+        self.tb_clr = TextBox(self.fig.add_axes(r), "clearance mm ",
+                              initial="0.15")
+        self.w5.append(self.tb_clr)
         r = slot()
-        self.bt_build = Button(self.fig.add_axes(r), "BUILD solid")
-        self.bt_build.on_clicked(self._on_build)
-        self.w5.append(self.bt_build)
-        r = slot(h=0.035)
-        self.sl_sec = Slider(self.fig.add_axes(r), "section ", -1.0, 1.0,
-                             valinit=0.0)
-        self.sl_sec.on_changed(lambda v: self._draw())
-        self.w5.append(self.sl_sec)
-        r = slot(h=0.06)
-        self.radio_sec = RadioButtons(self.fig.add_axes(r),
-                                      ["side section (Y=…)", "cross section (X=…)"],
-                                      active=0)
-        self.radio_sec.on_clicked(lambda l: self._draw())
-        self.w5.append(self.radio_sec)
-        r = slot()
-        self.tb_out = TextBox(self.fig.add_axes(r), "out ",
-                              initial="frame_solid.stl")
+        self.tb_out = TextBox(self.fig.add_axes(r), "name ",
+                              initial="frame_solid")
         self.w5.append(self.tb_out)
-        r = slot(split=(0.67, 0.145))
-        self.bt_save = Button(self.fig.add_axes(r), "Save STL")
-        self.bt_save.on_clicked(self._on_save)
-        self.bt_cad = Button(self.fig.add_axes([0.835, r[1], 0.145, r[3]]),
-                             "Export CAD (DXF)")
+        r = slot(h=0.06)
+        self.bt_cad = Button(self.fig.add_axes(r), "EXPORT CAD (DXF + SCAD)")
         self.bt_cad.on_clicked(self._on_export_cad)
-        self.w5 += [self.bt_save, self.bt_cad]
+        self.w5.append(self.bt_cad)
 
         # ---------- always-visible project row
         self.tb_proj = TextBox(self.fig.add_axes([0.67, 0.075, 0.31, 0.045]),
@@ -446,7 +427,7 @@ class App:
         self.bt_pload.on_clicked(self._on_proj_load)
 
         self._groups = [self.w_load, self.w_level, self.w_sil, self.w_tier,
-                        self.w_extra, self.w_build]
+                        self.w_extra, self.w_export]
 
         # ---------- selectors / events
         self.rsel = RectangleSelector(self.ax_main, self._on_rect,
@@ -616,7 +597,7 @@ class App:
         self.sil = None
         self.maps = None
         self.level_maps = None
-        self.result = None
+        self.model = None
 
     # ================================================== step 2: level
     def _level_map(self):
@@ -714,7 +695,7 @@ class App:
             self._status(f"Silhouette failed: {e}")
             return
         self.maps = None
-        self.result = None
+        self.model = None
         self._status(f"Silhouette OK: {len(self.sil.polygon)} outline points. "
                      f"Interior windows/holes filled automatically.")
         self._draw()
@@ -868,7 +849,7 @@ class App:
             return
         self.base_thickness = round(s["total"], 2)
         self.base_y0 = round((s["hR"] - s["hL"]) / 2, 2)
-        self.result = None
+        self.model = None
         with self._busy("setting base…"):
             self._resegment()           # every tier measures from the base
             self._sync_boxes()
@@ -901,7 +882,7 @@ class App:
                 self._sort_regions()
                 self.sel = self._index_of(t)
                 self._resegment()       # a new tier re-cuts its neighbours
-                self.result = None
+                self.model = None
                 self._sync_boxes()
                 self._refresh_list()
                 note = self._coverage_note()
@@ -963,7 +944,7 @@ class App:
         with self._busy():
             self._sort_regions()
             self._resegment()
-            self.result = None
+            self.model = None
             self._sync_boxes()
             self._refresh_list()
             note = self._coverage_note()
@@ -982,7 +963,7 @@ class App:
         with self._busy("re-measuring scan…"):
             self._compute_maps()
             self._resegment()
-            self.result = None
+            self.model = None
             self._sync_boxes()
             self._refresh_list()
             note = self._coverage_note()
@@ -998,7 +979,7 @@ class App:
             if 0 <= i < len(self.regions):
                 self.regions.pop(i)
             self.sel = min(i, len(self.regions) - 1) if self.regions else None
-            self.result = None
+            self.model = None
             self._resegment()    # the tier above inherits a lower threshold
         self._select(self.sel)
 
@@ -1007,7 +988,7 @@ class App:
             return
         self.regions = []
         self.sel = None
-        self.result = None
+        self.model = None
         self._select(None)
 
     # ================================================== step 4: extras
@@ -1031,7 +1012,7 @@ class App:
                             "z0": round(z0, 2), "x1": round(x1, 2),
                             "z1": round(z1, 2), "ywidth": yw,
                             "tilt_deg": tilt, "yc": yc})
-        self.result = None
+        self.model = None
         self._status(f"Extra {len(self.extras)}: box, y {yc:+g} ± {yw / 2:g}, "
                      f"tilt {tilt}°. Edit via text boxes (applies to last).")
         self._draw()
@@ -1046,7 +1027,7 @@ class App:
         self.extras.append({"kind": "cyl_y", "x": round(x, 2),
                             "z": round(z, 2), "dia": dia, "ylen": ylen,
                             "yc": yc})
-        self.result = None
+        self.model = None
         self._status(f"Extra {len(self.extras)}: Y-cylinder ⌀{dia} × {ylen} "
                      f"centred at y {yc:+g}.")
         self._draw()
@@ -1063,7 +1044,7 @@ class App:
             else:
                 e["dia"] = float(self.tb_dia.text)
                 e["ylen"] = float(self.tb_ylen.text)
-            self.result = None
+            self.model = None
             self._draw()
         except ValueError:
             pass
@@ -1071,12 +1052,12 @@ class App:
     def _on_extra_del(self, _):
         if self.extras:
             self.extras.pop()
-            self.result = None
+            self.model = None
             self._draw()
 
     def _on_extra_clr(self, _):
         self.extras = []
-        self.result = None
+        self.model = None
         self._draw()
 
     # ================================================== selectors
@@ -1118,72 +1099,38 @@ class App:
                 and event.button == 1 and self.extra_kind.startswith("cyl")):
             self.add_extra_cyl(x, z)
 
-    # ================================================== step 5: build
-    def _on_build(self, _):
-        if self.sil is None:
-            self._status("Need a silhouette first (step 2).")
-            return
-        if self.base_thickness is None:
-            self._status("Set a base thickness first (step 3).")
-            return
-        try:
-            vox = float(self.tb_vox.text)
-            clr = float(self.tb_clr.text)
-        except ValueError:
-            self._status("Bad voxel/clearance value.")
-            return
-        self._status("Building… (large grids can take a minute)")
-        try:
-            with self._busy("building solid…"):
-                v, f, rep, pack = core.build_solid(
-                    self.sil, self.base_thickness, self.regions, self.extras,
-                    clearance=clr, voxel=vox, return_sdf=True,
-                    base_y0=self.base_y0)
-        except MemoryError:
-            self._status("Out of memory — increase voxel size.")
-            return
-        except Exception as e:
-            self._status(f"Build failed: {e}")
-            return
-        self.result = (v, f, rep, pack)
-        wt = "WATERTIGHT ✓" if rep["watertight"] else "NOT watertight ✗"
-        skipped = (f" {rep['regions_skipped']} region(s) had no footprint and "
-                   f"were skipped." if rep.get("regions_skipped") else "")
-        self._status(f"Built: {rep['faces']} tris, {rep['volume_cm3']:.1f} cm³, "
-                     f"voxel {vox} mm, clearance {clr} mm — {wt}. "
-                     f"Grid {rep['grid']} ({rep['grid_mem_mb']} MB).{skipped} "
-                     f"Inspect sections, then Save STL.")
-        self._draw()
-
-    def _on_save(self, _):
-        if self.result is None:
-            self._status("Build first.")
-            return
-        out = self.tb_out.text.strip() or "frame_solid.stl"
-        v, f, rep, _ = self.result
-        save_stl(out, v, f)
-        self._status(f"Saved {out}  ({rep['faces']} tris, "
-                     f"{'watertight' if rep['watertight'] else 'NOT watertight'})")
+    # ================================================== step 6: export
+    def _sketch_model(self):
+        """The model as sketches + extrusion depths (cached for the preview)."""
+        if self.model is None and self.sil is not None \
+                and self.base_thickness is not None:
+            try:
+                clr = float(self.tb_clr.text)
+            except ValueError:
+                clr = 0.0
+            self.model = core.sketch_model(
+                self.sil, self.base_thickness, self.regions, self.extras,
+                base_y0=self.base_y0, clearance=clr)
+        return self.model
 
     def _on_export_cad(self, _):
-        """Export the tier model as sketches — no voxel build needed."""
         if self.sil is None:
-            self._status("Need a silhouette first (step 2).")
+            self._status("Need a silhouette first (step 3).")
             return
         if self.base_thickness is None:
-            self._status("Set the base thickness first (step 3).")
+            self._status("Set the base thickness first (step 4).")
             return
         try:
             clr = float(self.tb_clr.text)
         except ValueError:
-            clr = 0.0
+            self._status("Clearance must be a number.")
+            return
         folder = os.path.splitext(self.tb_out.text.strip()
-                                  or "frame_solid.stl")[0] + "_cad"
+                                  or "frame_solid")[0] + "_cad"
         try:
             with self._busy("exporting sketches…"):
-                model = core.sketch_model(self.sil, self.base_thickness,
-                                          self.regions, self.extras,
-                                          base_y0=self.base_y0, clearance=clr)
+                self.model = None            # clearance may have changed
+                model = self._sketch_model()
                 files = core.export_cad(folder, model, meta={
                     "scan": self.scan_path, "clearance": clr,
                     "base_y0": self.base_y0})
@@ -1192,9 +1139,10 @@ class App:
             return
         self._status(f"Exported {len(model)} sketches to {folder}\\ "
                      f"({len(files)} files): one DXF each plus "
-                     f"all_sketches.dxf, build.txt (extrusion depths) and "
+                     f"all_sketches.dxf, build.txt (the extrusion table) and "
                      f"assembly.scad. Clearance {clr:g} mm is baked in — "
                      f"set it to 0 for nominal outlines.")
+        self._draw()
 
     # ================================================== project I/O
     def _on_proj_save(self, _):
@@ -1207,9 +1155,8 @@ class App:
              "level_pts": [list(map(float, p)) for p in self.level_pts],
              "map_px": self.tb_mpx.text,
              "regions": self.regions, "extras": self.extras,
-             "build": {"voxel": self.tb_vox.text,
-                       "clearance": self.tb_clr.text,
-                       "out": self.tb_out.text}}
+             "export": {"clearance": self.tb_clr.text,
+                        "out": self.tb_out.text}}
         path = self.tb_proj.text.strip() or "project.json"
         with open(path, "w") as fh:
             json.dump(d, fh, indent=2)
@@ -1225,9 +1172,9 @@ class App:
         self.tb_px.set_val(d["sil"]["px"])
         self.tb_close.set_val(d["sil"]["close"])
         self.tb_simp.set_val(d["sil"]["simplify"])
-        self.tb_vox.set_val(d["build"]["voxel"])
-        self.tb_clr.set_val(d["build"]["clearance"])
-        self.tb_out.set_val(d["build"].get("out", "frame_solid.stl"))
+        exp = d.get("export", d.get("build", {}))     # "build" is the old key
+        self.tb_clr.set_val(str(exp.get("clearance", "0.15")))
+        self.tb_out.set_val(str(exp.get("out", "frame_solid")))
         self.tb_mpx.set_val(str(d.get("map_px", "0.5")))
         # base_width is the pre-two-sided key name
         self.base_thickness = d.get("base_thickness", d.get("base_width"))
@@ -1249,7 +1196,7 @@ class App:
             self._apply_transform(center=False)
             self.sil = None
             self.maps = None
-            self.result = None
+            self.model = None
             self._status(f"Project loaded; scan reloaded ({len(v)} verts). "
                          f"Re-run step 2 (Extract) to continue.")
         else:
@@ -1368,30 +1315,36 @@ class App:
                          "(kind set at right; y-mid offsets it off centre)")
             ax.set_aspect("equal")
 
-        elif self.step == S_BUILD:    # build
-            if self.result is not None:
-                _, _, rep, pack = self.result
-                sdf, (xlo, ylo, zlo), vox = pack
-                t = self.sl_sec.val   # -1..1
-                if self.radio_sec.value_selected.startswith("side"):
-                    y = t * (sdf.shape[1] * vox / 2)
-                    m, mex = core.sdf_slice_y(pack, y)
-                    ax.imshow(m.T, origin="lower",
-                              extent=(mex[0], mex[1], mex[2], mex[3]),
-                              cmap="copper")
-                    ax.set_title(f"Solid section at Y = {y:+.1f} mm "
-                                 "(bright = material to subtract)")
-                    ax.set_xlabel("X mm"); ax.set_ylabel("Z mm")
-                else:
-                    x = t * (sdf.shape[0] * vox / 2)
-                    m, mex = core.sdf_slice_x(pack, x)
-                    ax.imshow(m.T, origin="lower",
-                              extent=(mex[0], mex[1], mex[2], mex[3]),
-                              cmap="copper")
-                    ax.set_title(f"Cross-section at X = {x:+.1f} mm")
-                    ax.set_xlabel("Y mm"); ax.set_ylabel("Z mm")
+        elif self.step == S_EXPORT:
+            model = self._sketch_model()
+            if model:
+                colours = {"base": "0.35", "left": "tab:blue",
+                           "right": "tab:red", "extra": "tab:green"}
+                for i, s in enumerate(model):
+                    c = colours.get(s.get("side", s["kind"]), "tab:orange")
+                    for loop in s["loops"]:
+                        p = np.asarray(loop, float)
+                        ax.add_patch(MplPolygon(p, closed=True, fill=False,
+                                                ec=c, lw=1.6, alpha=0.9))
+                    if "circle" in s:
+                        cx, cz, rr = s["circle"]
+                        ax.add_patch(MplCircle((cx, cz), rr, fill=False,
+                                               ec=c, lw=1.6))
+                    # the outlines nest, so label them in a column rather
+                    # than on top of each other at the frame's corner
+                    ax.text(0.99, 0.97 - 0.035 * i,
+                            f"{s['key']:<16} y {s['y_lo']:+7.2f} .."
+                            f"{s['y_hi']:+7.2f}", color=c, fontsize=7.5,
+                            family="monospace", ha="right", va="top",
+                            transform=ax.transAxes)
+                ax.autoscale_view()
+                ax.set_title(f"{len(model)} sketches to export — every outline "
+                             f"and its extrusion range in Y\n"
+                             f"grey = base · blue = left tiers · red = right "
+                             f"tiers · green = extras", fontsize=9)
+                ax.set_xlabel("X mm"); ax.set_ylabel("Z mm")
             else:
-                ax.set_title("Press BUILD")
+                ax.set_title("Set a base thickness and some tiers first")
             ax.set_aspect("equal")
 
         self.fig.canvas.draw_idle()
