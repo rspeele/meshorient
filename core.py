@@ -215,10 +215,11 @@ class ThicknessMaps:
     silhouette.  Rows = Z (row 0 = min Z), cols = X.
     """
 
-    def __init__(self, hL, hR, sil_mask, x0, z0, px):
+    def __init__(self, hL, hR, sil_mask, x0, z0, px, sil=None):
         self.hL = hL
         self.hR = hR
         self.sil_mask = sil_mask     # silhouette at this resolution, 0/255
+        self.sil = sil               # ... and at its own, for exact clipping
         self.x0, self.z0, self.px = x0, z0, px
 
     @property
@@ -326,7 +327,7 @@ def measure_maps(verts, faces, sil: Silhouette = None, px=0.5) -> ThicknessMaps:
     sil_small = (cv2.resize(sil.mask, (w, h), interpolation=cv2.INTER_NEAREST)
                  if sil is not None else np.full((h, w), 255, np.uint8))
     return ThicknessMaps(_fill_gaps(hL, sil_small), _fill_gaps(hR, sil_small),
-                         sil_small, x0, z0, px)
+                         sil_small, x0, z0, px, sil)
 
 
 def sample_maps(maps: ThicknessMaps, x, z, r_mm=1.0):
@@ -369,6 +370,66 @@ def base_from_maps(maps: ThicknessMaps):
 def base_faces(base_thickness, base_y0=0.0):
     """(yR, yL) of the base slab: base_y0 ± base_thickness/2."""
     return base_y0 + base_thickness / 2.0, base_y0 - base_thickness / 2.0
+
+
+def _snap_to_polygon(poly, ref, tol):
+    """Pull vertices lying within tol of `ref`'s boundary exactly onto it.
+
+    Where a tier runs out to the edge of the frame, its outline and the base
+    outline must be the same line — a tenth of a millimetre of disagreement
+    shows up as a step in the built solid.
+    """
+    A = np.asarray(ref, float)
+    B = np.roll(A, -1, axis=0)
+    d = B - A
+    L2 = np.einsum("ij,ij->i", d, d)
+    L2 = np.where(L2 > 0, L2, 1.0)
+    out = np.array(poly, float)
+    for i, p in enumerate(out):
+        t = np.clip(np.einsum("ij,ij->i", p - A, d) / L2, 0.0, 1.0)
+        proj = A + t[:, None] * d
+        off = p - proj
+        k = int(np.argmin(np.einsum("ij,ij->i", off, off)))
+        if np.hypot(*off[k]) <= tol:
+            out[i] = proj[k]
+    return out
+
+
+def _clip_to_silhouette(polys, sil: Silhouette, simplify_mm=0.2,
+                        min_area_mm2=2.0, snap_tol=0.35):
+    """Trim tier outlines to the frame profile, at the profile's resolution.
+
+    Doing this on the coarse thickness-map grid left every tier a fraction
+    of a millimetre short of the outline — a visible ledge that no amount of
+    grow_mm could close, because growing then clipped back to the same
+    inset boundary.
+    """
+    if sil is None or not polys:
+        return polys
+    img = np.zeros(sil.mask.shape, np.uint8)
+    conts = []
+    for p in polys:
+        p = np.asarray(p, float)
+        q = np.empty_like(p)
+        q[:, 0] = (p[:, 0] - sil.x0) / sil.px        # col = x
+        q[:, 1] = (p[:, 1] - sil.z0) / sil.px        # row = z
+        conts.append(np.round(q).astype(np.int32))
+    cv2.fillPoly(img, conts, 255)
+    img = cv2.bitwise_and(img, sil.mask)
+
+    cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for c in cnts:
+        if float(cv2.contourArea(c)) * sil.px ** 2 < min_area_mm2:
+            continue
+        a = cv2.approxPolyDP(c, max(1.0, simplify_mm / sil.px), True)
+        a = a.reshape(-1, 2).astype(np.float64)
+        if len(a) < 3:
+            continue
+        world = np.stack([sil.x0 + a[:, 0] * sil.px,
+                          sil.z0 + a[:, 1] * sil.px], axis=1)
+        out.append(_snap_to_polygon(world, sil.polygon, snap_tol))
+    return out
 
 
 def region_kind(region):
@@ -485,22 +546,39 @@ def segment_tier(maps: ThicknessMaps, tiers, tier, base_thickness,
         kk = max(3, int(round(2 * grow / px)) | 1)
         img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                                         (kk, kk)))
-    img = cv2.bitwise_and(img, maps.sil_mask)
+        if maps.sil is None:                 # no profile to clip against
+            img = cv2.bitwise_and(img, maps.sil_mask)
+    elif maps.sil is not None:
+        # The maps stop at the silhouette rendered on this coarse grid, which
+        # sits inside the real profile. Let the mask spill over that edge —
+        # but ONLY outside it, so interior tier boundaries do not fatten —
+        # and let the clip below put it back on the real profile.
+        spill = cv2.bitwise_and(
+            cv2.dilate(img, np.ones((5, 5), np.uint8)),
+            cv2.bitwise_not(maps.sil_mask))
+        img = cv2.bitwise_or(img, spill)
 
     cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    polys, total = [], 0.0
+    polys = []
     for c in cnts:
-        area = float(cv2.contourArea(c)) * px * px
-        if area < min_area_mm2:
+        if float(cv2.contourArea(c)) * px * px < min_area_mm2:
             continue
         approx = cv2.approxPolyDP(c, max(1.0, simplify_mm / px), True)
         approx = approx.reshape(-1, 2).astype(np.float64)
         if len(approx) < 3:
             continue
-        polys.append([[round(maps.x0 + a * px, 3), round(maps.z0 + b * px, 3)]
-                      for a, b in approx])
-        total += area
-    tier["polys"] = polys
+        polys.append(np.stack([maps.x0 + approx[:, 0] * px,
+                               maps.z0 + approx[:, 1] * px], axis=1))
+    # a grown outline may now stick out past the frame; trim it there, at
+    # the profile's own resolution so the two share an edge exactly
+    polys = _clip_to_silhouette(polys, maps.sil, min_area_mm2=min_area_mm2)
+
+    total = 0.0
+    for p in polys:
+        x, y = np.asarray(p).T
+        total += abs(float(np.dot(x, np.roll(y, -1)) -
+                           np.dot(y, np.roll(x, -1)))) / 2.0
+    tier["polys"] = [[[round(a, 3), round(b, 3)] for a, b in p] for p in polys]
     tier["area_mm2"] = round(total, 1)
     tier["threshold_mm"] = round(thr, 3)
     return total
@@ -837,7 +915,11 @@ def _grow_loops(loops, mm, simplify_mm=0.1):
         return loops
     px = float(np.clip(mm / 4.0, 0.02, 0.1))
     pts = np.vstack(loops)
-    x0, z0 = pts[:, 0].min() - mm - 5 * px, pts[:, 1].min() - mm - 5 * px
+    # snap the raster to a shared lattice: the base outline and a tier that
+    # runs out to it must come back from this with the SAME offset edge, and
+    # they only do if they were rasterised on the same grid
+    x0 = np.floor((pts[:, 0].min() - mm - 5 * px) / px) * px
+    z0 = np.floor((pts[:, 1].min() - mm - 5 * px) / px) * px
     x1, z1 = pts[:, 0].max() + mm + 5 * px, pts[:, 1].max() + mm + 5 * px
     w = int(np.ceil((x1 - x0) / px)) + 1
     h = int(np.ceil((z1 - z0) / px)) + 1

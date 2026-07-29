@@ -95,7 +95,9 @@ not the right-hand view with the far side showing through.
   `over` is how much proud of the tier below a feature must be to get roped
   in: a noise margin, 0.3 mm suits most scanners. `grow` Minkowski-grows the
   outline for parts that have to *move* — a trigger bar needs room fore, aft
-  and up, not just clearance on its face.
+  and up, not just clearance on its face. A tier can never grow past the
+  frame profile; where it reaches the profile it shares that edge exactly,
+  so there's no ledge between it and the base.
 - Edits to those boxes (and to `base T` / `y0`) commit when you press
   **APPLY** or Enter, and never before — so you can tab between boxes
   without paying for a re-cut each time, and you can force one without

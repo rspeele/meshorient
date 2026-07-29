@@ -93,7 +93,16 @@ VCarve (CNC), FDM printing for fit prototypes.
     outline is NOT auto-dilated (sampling bias outward ≈ contour inset), the
     speckle-killing MORPH_OPEN is skipped on the silhouette rim (it would
     nibble a sliver off and leave that rim under-thick), and
-    coverage_report dilates the built map by 1 px before comparing.
+    coverage_report dilates the built map by 1 px before comparing;
+  - a tier is cut on the coarse map grid but clipped to the profile on the
+    SILHOUETTE's grid (`_clip_to_silhouette`), then boundary vertices within
+    0.35 mm of `sil.polygon` are snapped exactly onto it. Clipping on the
+    map grid instead left every tier ~0.7 mm short of the profile — a ledge
+    in the built solid that grow_mm could never close, because growing then
+    clipped back to the same inset boundary (user-reported, via OpenSCAD).
+    For the same reason `_grow_loops` snaps its raster to a shared lattice:
+    the base and a tier that meets it must come out of the clearance offset
+    with the same edge.
 - Legacy `{"x0","z0","x1","z1","width"}` rectangle regions still build (old
   projects, sample_project.json) — they assign in list order rather than
   stacking. `core.region_kind()` tells them apart.

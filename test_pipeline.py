@@ -152,6 +152,33 @@ assert any(_Path(np.asarray(p)).contains_point((57, 37))
            for p in by[("rail", "right")]["polys"]), \
     "tier outlines must fill interior holes"
 
+# A tier that runs out to the edge of the frame must SHARE that edge with the
+# base outline. Stopping a fraction of a millimetre short leaves a ledge in
+# the built solid that no amount of grow_mm can close, because growing then
+# clips back to the same inset boundary.
+sil_path = _Path(np.asarray(sil.polygon))
+
+
+def in_tier(t, q):
+    return any(_Path(np.asarray(p)).contains_point(q) for p in t["polys"])
+
+
+edge = ([(x, -60 + 0.3) for x in range(-30, 31, 10)]     # grip bottom edge
+        + [(39.6, z) for z in range(-50, 21, 10)])       # grip rear edge
+for name, t in (("grip", by[("grip", "right")]),
+                ("grip grown", dict(by[("grip", "right")], grow_mm=1.5))):
+    if "grown" in name:
+        core.segment_tier(maps, tiers + [t], t, base, base_y0)
+    missed = [q for q in edge if not in_tier(t, q)]
+    print(f"  {name}: reaches the frame edge at {len(edge) - len(missed)}"
+          f"/{len(edge)} probes 0.3 mm inside the outline")
+    assert not missed, (name, missed)
+    # ... and must not spill outside it either
+    out = [q for p in t["polys"] for q in p
+           if not sil_path.contains_point(q, radius=0.02)
+           and not sil_path.contains_point(q, radius=-0.02)]
+    assert not out, (name, out[:4])
+
 # growth is a Minkowski dilation of the tier outline
 grown = dict(by[("boss", "right")], grow_mm=2.0)
 core.segment_tier(maps, tiers + [grown], grown, base, base_y0)
