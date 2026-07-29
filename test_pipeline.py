@@ -10,24 +10,46 @@ from meshio_lite import load_mesh
 import core
 
 
-def read_dxf_polylines(path):
-    """Minimal DXF reader — enough to prove what we wrote is readable."""
+def read_dxf_entities(path):
+    """Minimal DXF reader — enough to prove what we wrote is readable.
+
+    Returns (segments, circles): LINE endpoint pairs and (x, y, r) circles.
+    """
     with open(path) as fh:
         tok = [t.strip() for t in fh]
     pairs = list(zip(tok[0::2], tok[1::2]))
-    loops, cur, in_poly = [], None, False
-    for i, (code, val) in enumerate(pairs):
+    segs, circles, cur, kind = [], [], {}, None
+    allowed = {"LINE", "CIRCLE"}
+    for code, val in pairs:
         if code == "0":
-            if val == "POLYLINE":
-                cur, in_poly = [], True
-            elif val == "SEQEND" and in_poly:
-                loops.append(np.asarray(cur, float))
-                cur, in_poly = None, False
-            elif val == "VERTEX":
-                cur.append([None, None])
-        elif in_poly and cur and code in ("10", "20") and \
-                pairs[i - 1][1] != "POLYLINE":
-            cur[-1][0 if code == "10" else 1] = float(val)
+            if kind == "LINE":
+                segs.append(((cur["10"], cur["20"]), (cur["11"], cur["21"])))
+            elif kind == "CIRCLE":
+                circles.append((cur["10"], cur["20"], cur["40"]))
+            kind = val if val in allowed else None
+            cur = {}
+            assert val not in ("POLYLINE", "VERTEX", "SEQEND", "LWPOLYLINE"), \
+                f"{path}: {val} is not portable — OpenSCAD rejects it"
+        elif kind and code in ("10", "20", "11", "21", "40"):
+            cur[code] = float(val)
+    return segs, circles
+
+
+def read_dxf_polylines(path):
+    """Reassemble the LINE segments back into closed loops, in order."""
+    segs, _ = read_dxf_entities(path)
+    loops, cur, prev_end = [], [], None
+    for a, b in segs:
+        if cur and np.hypot(*np.subtract(a, prev_end)) > 1e-6:
+            loops.append(np.asarray(cur, float))       # a break in the chain
+            cur = []
+        cur.append(a)
+        prev_end = b
+        if np.hypot(*np.subtract(b, cur[0])) < 1e-6:   # ring closed
+            loops.append(np.asarray(cur, float))
+            cur, prev_end = [], None
+    if cur:
+        loops.append(np.asarray(cur, float))
     return loops
 
 # ---- load synthetic scan
@@ -243,16 +265,21 @@ files = core.export_cad("frame_solid_cad", model, meta={
 print(f"wrote {len(files)} CAD files to frame_solid_cad/")
 assert all(os.path.isfile(f) for f in files)
 
-# the DXFs must read back as the same closed loops
+# the DXFs must read back as the same closed loops, and must contain only
+# entities every importer handles (OpenSCAD rejects POLYLINE/LWPOLYLINE)
 for s in model:
+    path = os.path.join("frame_solid_cad", s["key"] + ".dxf")
+    segs, circles = read_dxf_entities(path)
+    assert len(circles) == (1 if "circle" in s else 0), s["key"]
     if not s["loops"]:
         continue
-    loops = read_dxf_polylines(os.path.join("frame_solid_cad",
-                                            s["key"] + ".dxf"))
-    assert len(loops) == len(s["loops"]), s["key"]
+    loops = read_dxf_polylines(path)
+    assert len(loops) == len(s["loops"]), (s["key"], len(loops))
     for a, b in zip(loops, s["loops"]):
         assert np.allclose(a, b, atol=1e-3), s["key"]
-print("DXF round-trip OK")
+    assert len(segs) == sum(len(l) for l in s["loops"]), "loops must close"
+read_dxf_entities(os.path.join("frame_solid_cad", "all_sketches.dxf"))
+print("DXF round-trip OK (LINE/CIRCLE only)")
 
 # ---- preview images -------------------------------------------------
 fig, axes = plt.subplots(2, 3, figsize=(16, 9))

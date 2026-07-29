@@ -48,6 +48,11 @@ a._on_level(None)
 tilt_after, _ = a._level_fit()
 print(f"level: tilt {tilt_after:.3f}° after")
 assert tilt_after < 0.05, "levelling should square the picked face to Y"
+a.fig.savefig("gui_step2_level_after.png", dpi=100)
+# the front/top views are on this step too, so the correction is visible
+assert a.ax_front.get_visible() and a.ax_top.get_visible()
+assert not a.ax_side.get_visible(), "side view belongs to step 1"
+assert len(a.ax_front.lines) >= 2, "datum + fitted plane trace"
 # and the flat wall now reads the same thickness end to end
 lvl = a._level_map()
 ys = [core.sample_maps(lvl, x, z + 5.0)["hR"] for x, z in flat]

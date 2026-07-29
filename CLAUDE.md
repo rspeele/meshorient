@@ -18,9 +18,14 @@ VCarve (CNC), FDM printing for fit prototypes.
   widgets (NOT tkinter) were chosen so the GUI is testable headless with the
   Agg backend; on Windows it runs on the default TkAgg backend.
 - `meshio_lite.py` — self-contained STL/OBJ/PLY read, binary STL + R12 DXF
-  write (POLYLINE/CIRCLE, layer table, header — R12 because that is what
-  SolveSpace and OpenSCAD accept), watertightness check. No trimesh
-  (deliberate).
+  write, watertightness check. No trimesh (deliberate). The DXF writer emits
+  ONLY `LINE` and `CIRCLE`: closed outlines go out as rings of segments.
+  This is not an aesthetic choice — OpenSCAD rejects R12
+  POLYLINE/VERTEX/SEQEND outright ("Unsupported DXF Entity", confirmed by
+  the user), and LWPOLYLINE would mean an R13+ file with entity handles.
+  OpenSCAD restitches coincident endpoints into closed paths and SolveSpace
+  explodes polylines into segments on import, so neither loses anything.
+  Do not "tidy" this back into polylines.
 - Dependencies are ONLY numpy/scipy/scikit-image/opencv-python/matplotlib
   (see requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely
   without discussing — the constraint was plain pip wheels, no mesh stack.
@@ -55,9 +60,14 @@ VCarve (CNC), FDM printing for fit prototypes.
   points on a face that really is flat; `core.level_rotation()` fits a plane
   (SVD) and returns the SMALLEST rotation squaring it to Y (Rodrigues about
   n x y), so it removes tilt without spinning the frame about Y. Its view is
-  the right-face height map, where a tilt reads as a gradient. Picks are
+  the right-face height map, where a tilt reads as a gradient, plus the
+  front (Y-Z) and top (X-Y) views borrowed from step 1 — the two components
+  of a tilt are visible one per view, each titled with its own angle, with
+  the fitted plane's trace in red against a blue Y=0 datum. Picks are
   world-space, so any re-orientation in step 1 clears them; levelling itself
   carries them into the new frame so you can level twice and see 0.00°.
+  Step 2 re-positions ax_main/ax_front/ax_top (POS_L_* vs POS_O_*) rather
+  than owning duplicate axes.
 - The tier model (core of the tool — read core.py's module docstring):
   - `measure_maps()` measures where the scan's left and right faces sit per
     side-view pixel (hL, hR, positive outward from Y=0). It samples the
@@ -158,10 +168,13 @@ VCarve (CNC), FDM printing for fit prototypes.
 - Tier outlines are clipped to the silhouette; a tier cannot extend past the
   frame profile even after grow_mm. Use an extra for that.
 - Silhouette keeps only largest outer contour; scan junk must be pre-cropped.
-- The DXF export has NOT been verified against real SolveSpace/OpenSCAD
-  installs (neither is available here) — only against the format spec and a
-  round-trip reader in test_pipeline.py. If an importer complains, that is
-  the first place to look.
+- The DXF export is verified here only against the format spec and the
+  round-trip reader in test_pipeline.py (no SolveSpace/OpenSCAD available).
+  What IS confirmed from the field: OpenSCAD rejected the earlier POLYLINE
+  output ("Unsupported DXF Entity"). The LINE/CIRCLE replacement has not yet
+  been run through OpenSCAD or SolveSpace. If an importer complains, entity
+  types are the first place to look — test_pipeline asserts nothing but
+  LINE/CIRCLE is emitted.
 - Possible next features: select/edit individual extras (tiers have this
   now), extras along arbitrary axes, an "extend beyond silhouette" helper
   for where the frame exits the grip, per-extra clearance opt-out, a

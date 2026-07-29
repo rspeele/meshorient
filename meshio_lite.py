@@ -234,12 +234,17 @@ def dxf_circle(x, y, r, layer="0"):
 
 
 def save_dxf(path, entities):
-    """Write an AC1009 (R12) DXF.
+    """Write an AC1009 (R12) DXF using LINE and CIRCLE entities only.
 
-    R12 POLYLINE/VERTEX rather than LWPOLYLINE, because R12 is what every
-    CAD importer accepts — SolveSpace and OpenSCAD included. Layers used by
-    the entities are declared in the TABLES section; importers that ignore
-    layers still get every entity.
+    Closed loops go out as a ring of LINE segments rather than as a POLYLINE
+    or LWPOLYLINE. It is more verbose, but LINE and CIRCLE are the two
+    entities every DXF reader implements: OpenSCAD rejects the R12
+    POLYLINE/VERTEX/SEQEND trio outright ("Unsupported DXF Entity") and
+    LWPOLYLINE would mean an R13+ file with entity handles. OpenSCAD stitches
+    coincident segment ends back into closed paths, and SolveSpace explodes
+    polylines into separate line segments on import anyway, so neither tool
+    loses anything. Layers are declared in TABLES; readers that ignore layers
+    still get every entity.
     """
     entities = [dict(e, layer=dxf_layer_name(e.get("layer", "0")))
                 for e in entities]
@@ -282,14 +287,13 @@ def save_dxf(path, entities):
     for e in entities:
         layer = e.get("layer", "0")
         if e["type"] == "polyline":
-            pts = np.asarray(e["points"], float)
-            out += ["0", "POLYLINE", "8", layer, "66", "1",
-                    "10", "0.0", "20", "0.0", "30", "0.0",
-                    "70", "1" if e.get("closed", True) else "0"]
-            for x, y in pts:
-                out += ["0", "VERTEX", "8", layer,
-                        "10", f"{x:.4f}", "20", f"{y:.4f}", "30", "0.0"]
-            out += ["0", "SEQEND", "8", layer]
+            pts = np.asarray(e["points"], float).tolist()
+            if e.get("closed", True) and len(pts) > 2:
+                pts = pts + [pts[0]]
+            for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+                out += ["0", "LINE", "8", layer,
+                        "10", f"{x0:.4f}", "20", f"{y0:.4f}", "30", "0.0",
+                        "11", f"{x1:.4f}", "21", f"{y1:.4f}", "31", "0.0"]
         elif e["type"] == "circle":
             cx, cy = e["center"]
             out += ["0", "CIRCLE", "8", layer, "10", f"{cx:.4f}",

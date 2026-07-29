@@ -205,6 +205,15 @@ class App:
         self.ax_front = self.fig.add_axes([0.36, 0.55, 0.27, 0.37])
         self.ax_top = self.fig.add_axes([0.05, 0.10, 0.27, 0.37])
         self.orient_axes = [self.ax_side, self.ax_front, self.ax_top]
+        # the Level step borrows the front and top views (that is where the
+        # two components of a residual tilt are visible) and shrinks the
+        # main view to make room, so it re-positions all three
+        self.POS_MAIN = [0.05, 0.16, 0.58, 0.76]
+        self.POS_O_FRONT = [0.36, 0.55, 0.27, 0.37]
+        self.POS_O_TOP = [0.05, 0.10, 0.27, 0.37]
+        self.POS_L_MAIN = [0.05, 0.34, 0.45, 0.58]
+        self.POS_L_FRONT = [0.525, 0.34, 0.11, 0.58]
+        self.POS_L_TOP = [0.05, 0.15, 0.45, 0.19]
         # step 3 shows the two sides as separate views. The left one is
         # mirrored in X, so it is what you see standing on the frame's left —
         # not the right-hand view with the far side showing through.
@@ -482,9 +491,19 @@ class App:
             w.ax.set_visible(True)
             self._enable(w, True)
         show_orient = (i == S_LOAD)
+        show_level = (i == S_LEVEL)
         show_tiers = (i == S_TIERS)
-        for ax in self.orient_axes:
-            ax.set_visible(show_orient)
+        self.ax_side.set_visible(show_orient)
+        for ax in (self.ax_front, self.ax_top):
+            ax.set_visible(show_orient or show_level)
+        if show_level:
+            self.ax_main.set_position(self.POS_L_MAIN)
+            self.ax_front.set_position(self.POS_L_FRONT)
+            self.ax_top.set_position(self.POS_L_TOP)
+        else:
+            self.ax_main.set_position(self.POS_MAIN)
+            self.ax_front.set_position(self.POS_O_FRONT)
+            self.ax_top.set_position(self.POS_O_TOP)
         for ax in self.tier_axes.values():
             ax.set_visible(show_tiers)
         self.ax_main.set_visible(not show_orient and not show_tiers)
@@ -1297,12 +1316,13 @@ class App:
                            f"{len(self.level_pts)}/3 points picked")
                 ax.set_title(
                     f"RIGHT face height, {vmin:.1f}–{vmax:.1f} mm — a tilt "
-                    f"reads as a gradient across a flat face\n"
+                    f"reads as a gradient\n"
                     f"click 3+ points on one flat face · {verdict}",
-                    fontsize=10)
+                    fontsize=9)
             else:
                 ax.set_title("Load a scan first (step 1)")
             ax.set_aspect("equal")
+            self._draw_level_aux()
 
         elif self.step == S_SIL:      # silhouette
             if self.sil is not None:
@@ -1375,6 +1395,55 @@ class App:
             ax.set_aspect("equal")
 
         self.fig.canvas.draw_idle()
+
+    def _draw_level_aux(self):
+        """Front and top views on the Level step.
+
+        A residual tilt splits into exactly two visible components: about X
+        (leans the frame in the FRONT view) and about Z (leans it in the TOP
+        view). Both get the Y=0 datum as a dotted line and, once three points
+        are picked, the fitted plane's trace in red — level it and the red
+        line lands parallel to the datum.
+        """
+        v = self.verts
+        if v is None:
+            return
+        self._hist2d(self.ax_front, v[:, 1], v[:, 2], "", "Y (across) mm",
+                     "Z mm")
+        self._hist2d(self.ax_top, v[:, 0], v[:, 1], "", "X mm",
+                     "Y (across) mm")
+        self.ax_front.axvline(0, color="#00a5ff", ls="--", lw=1.4, zorder=5)
+        self.ax_top.axhline(0, color="#00a5ff", ls="--", lw=1.4, zorder=5)
+
+        about_x = about_z = None
+        if len(self.level_pts) >= 3:
+            pts = np.asarray(self.level_pts, float)
+            n, c, _ = core.fit_plane(pts)
+            if n[1] < 0:
+                n = -n
+            if abs(n[1]) > 1e-9:
+                xb, zb = pts[:, 0].mean(), pts[:, 2].mean()
+                zz = np.array([v[:, 2].min(), v[:, 2].max()])
+                self.ax_front.plot(
+                    c[1] - (n[0] * (xb - c[0]) + n[2] * (zz - c[2])) / n[1],
+                    zz, "-", color="tab:red", lw=1.8, zorder=6)
+                xx = np.array([v[:, 0].min(), v[:, 0].max()])
+                self.ax_top.plot(
+                    xx,
+                    c[1] - (n[0] * (xx - c[0]) + n[2] * (zb - c[2])) / n[1],
+                    "-", color="tab:red", lw=1.8, zorder=6)
+                about_x = np.degrees(np.arctan2(n[2], n[1]))
+                about_z = np.degrees(np.arctan2(n[0], n[1]))
+            for p in pts:
+                self.ax_front.plot([p[1]], [p[2]], "kx", ms=7, mew=1.8)
+                self.ax_top.plot([p[0]], [p[1]], "kx", ms=7, mew=1.8)
+
+        self.ax_front.set_title(
+            "FRONT (Y-Z)" + (f" — tilt about X {about_x:+.2f}°"
+                             if about_x is not None else ""), fontsize=9)
+        self.ax_top.set_title(
+            "TOP (X-Y)" + (f" — tilt about Z {about_z:+.2f}°"
+                           if about_z is not None else ""), fontsize=9)
 
     def _draw_tiers(self):
         """Step 3: the two sides as separate views, each with its own tiers."""

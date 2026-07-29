@@ -54,8 +54,15 @@ Y it found, and once you have three the title tells you the tilt angle and
 how coplanar your picks actually were (if that number is large, one of them
 isn't on the flat). **LEVEL** applies the smallest rotation that squares
 that face up to Y; it only removes tilt, it never spins the frame about Y.
-Level again to confirm it now reads 0.00°. "Undo level" puts the
-orientation back.
+"Undo level" puts the orientation back.
+
+The **front (Y-Z)** and **top (X-Y)** views sit alongside, because that is
+where the two components of a tilt are actually visible: a tilt about X
+leans the frame in the front view, a tilt about Z leans it in the top view,
+and each title names its own angle. The fitted plane is drawn in red against
+a blue Y=0 datum — press LEVEL and the red line snaps parallel to the blue
+one. That is the correction, visible rather than asserted. Level again and
+it should read 0.00°.
 
 **3 · Silhouette.** Extracts the side-view **outer** contour. Interior
 windows, pin holes, and lightening cuts vanish automatically — only the
