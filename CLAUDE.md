@@ -26,7 +26,8 @@ printing for fit prototypes.
   mean an R13+ file with entity handles. OpenSCAD restitches coincident
   endpoints into closed paths and SolveSpace explodes polylines into
   segments on import, so neither loses anything. Do not "tidy" this back
-  into polylines. save_stl is only there for make_synthetic.py.
+  into polylines. save_stl survives for make_synthetic.py and for the Level
+  step's oriented-scan re-export — the tool's own output is DXF.
 - Dependencies are ONLY numpy/opencv-python/matplotlib (see
   requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely without
   discussing — the constraint was plain pip wheels, no mesh stack. scipy and
@@ -65,6 +66,11 @@ printing for fit prototypes.
   carries them into the new frame so you can level twice and see 0.00°.
   Step 2 re-positions ax_main/ax_front/ax_top (POS_L_* vs POS_O_*) rather
   than owning duplicate axes.
+  Step 2 also re-exports the scan (`_on_export_oriented` -> save_stl of
+  self.verts + self.orig_faces, `<scan>_oriented.stl`): a rigid transform,
+  no resampling, so it is useful for the user's Blender/MeshMixer work even
+  when they are not building a solid. This is the only remaining caller of
+  save_stl outside make_synthetic.py.
 - The tier model (core of the tool — read core.py's module docstring):
   - `measure_maps()` measures where the scan's left and right faces sit per
     side-view pixel (hL, hR, positive outward from Y=0). It samples the

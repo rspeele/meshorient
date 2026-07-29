@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import numpy as np
 import app as appmod
 import core
+from meshio_lite import load_mesh
 
 
 a = appmod.App()
@@ -83,6 +84,22 @@ lvl = a._level_map()
 ys = [core.sample_maps(lvl, x, z + 5.0)["hR"] for x, z in flat]
 print("right-face heights after levelling:", [round(v, 3) for v in ys])
 assert max(ys) - min(ys) < 0.15, ys
+# the oriented scan can be written back out, orientation baked in
+a.scan_path = "gui_oriented_probe.stl"          # don't clobber the input
+a._on_export_oriented(None)
+assert os.path.isfile("gui_oriented_probe_oriented.stl")
+_v2, _f2 = load_mesh("gui_oriented_probe_oriented.stl")
+assert len(_f2) == len(a.orig_faces), "must be a rigid transform, not a remesh"
+assert np.allclose(_v2.min(0), a.verts.min(0), atol=1e-3)
+assert np.allclose(_v2.max(0), a.verts.max(0), atol=1e-3)
+# ... and it comes back already square: the flat wall reads one thickness
+_m2 = core.measure_maps(_v2, _f2, None, px=0.8)
+_ys = [core.sample_maps(_m2, x, z + 5.0)["hR"] for x, z in flat]
+print("re-imported oriented STL, right-face heights:",
+      [round(v, 3) for v in _ys])
+assert max(_ys) - min(_ys) < 0.15, _ys
+a.scan_path = "synthetic_frame_scan.stl"
+
 # undo puts the orientation back
 a._on_level_undo(None)
 assert a._level_fit()[0] > 1.0

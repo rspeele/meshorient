@@ -11,7 +11,10 @@ Steps (radio buttons, top right):
                   tilt, which is enough to make one end of a flat side read
                   thicker than the other. Click 3+ points on a face that
                   really is flat (right side of the frame) and LEVEL rotates
-                  the scan so that face is perpendicular to Y.
+                  the scan so that face is perpendicular to Y. The oriented
+                  scan can be written back out as an STL here — a rigid
+                  transform, nothing resampled — which is worth having for
+                  any other work you do on the scan.
   3 Silhouette  — extract the side-view OUTER outline. Windows and holes are
                   filled automatically. Export DXF for CAD tracing if wanted.
   4 Tiers       — two views, one per side of the frame (the left one is
@@ -51,7 +54,7 @@ from matplotlib.widgets import (Button, TextBox, RadioButtons,
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 
 import core
-from meshio_lite import load_mesh
+from meshio_lite import load_mesh, save_stl
 
 def _blit_widget(w):
     """Repaint just this widget's own axes, not the whole figure."""
@@ -400,6 +403,11 @@ class App:
                                   "Undo level")
         self.bt_lvl_undo.on_clicked(self._on_level_undo)
         self.w_level += [self.bt_lvl_clear, self.bt_lvl_undo]
+        r = slot()
+        self.bt_lvl_stl = Button(self.fig.add_axes(r),
+                                 "Export oriented STL (for Blender etc.)")
+        self.bt_lvl_stl.on_clicked(self._on_export_oriented)
+        self.w_level.append(self.bt_lvl_stl)
 
         self._wy = 0.745
         # ---------- step 3 widgets (Silhouette)
@@ -773,6 +781,32 @@ class App:
                      f"now sit within {after[1] * 2:.3f} mm of one Y. "
                      f"Re-extract the silhouette: {step_ref(S_SIL)}.")
         self._draw()
+
+    def _on_export_oriented(self, _):
+        """Write the scan back out with the orientation baked in.
+
+        A rigid transform of the vertices — same triangles, same topology,
+        nothing resampled — so sharp edges and open boundaries survive
+        exactly. Getting a scan square is the fiddly part; this hands the
+        result to Blender/MeshMixer so the rest of the work happens on a
+        datum that already means something.
+        """
+        if self.step != S_LEVEL:
+            return
+        if self.verts is None or self.orig_faces is None:
+            self._status(f"Load a scan first — {step_ref(S_LOAD)}.")
+            return
+        out = os.path.splitext(self.scan_path or "scan")[0] + "_oriented.stl"
+        try:
+            with self._busy("writing STL…"):
+                save_stl(out, self.verts, self.orig_faces)
+        except OSError as e:
+            self._status(f"Could not write {out}: {e}")
+            return
+        self._status(f"Wrote {out} — the same {len(self.orig_faces)} triangles, "
+                     f"rigidly transformed: X along the bore, Y across the "
+                     f"frame, Z up, centred on the bounding box. Nothing was "
+                     f"resampled, so edges and hole boundaries are untouched.")
 
     def _on_level_undo(self, _):
         if self.step != S_LEVEL or self._pre_level is None:

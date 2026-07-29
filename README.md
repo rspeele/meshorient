@@ -66,6 +66,14 @@ a blue Y=0 datum — press LEVEL and the red line snaps parallel to the blue
 one. That is the correction, visible rather than asserted. Level again and
 it should read 0.00°.
 
+**Export oriented STL** writes the scan back out with the orientation baked
+in, as `<scan>_oriented.stl`. It is a rigid transform of the vertices — same
+triangles, same topology, nothing resampled — so sharp edges and open
+boundaries survive exactly. Worth doing even if you carry on in this tool:
+getting a scan square is the fiddly part, and everything else you do to it
+(hole filling, CSG, registration in MeshMixer or Blender) is easier on a
+datum that already means something.
+
 **3 · Silhouette.** Extracts the side-view **outer** contour. Interior
 windows, pin holes, and lightening cuts vanish automatically — only the
 outermost outline is kept, which is exactly the "fill it solid" behavior you
