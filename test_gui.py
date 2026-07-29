@@ -29,15 +29,44 @@ v0 = a.verts.copy()
 a._rotate("y"); a._rotate("y"); a._rotate("y"); a._rotate("y")
 assert np.allclose(a.verts, v0, atol=1e-9), "4x 90deg rotation should be identity"
 
-# --- step 2: silhouette
-a._set_step(1)
+# --- step 2: level. Introduce a tilt PCA would have left behind, then
+# square it back up off three points on the grip's flat right wall.
+a._set_step(appmod.S_LEVEL)
+a.M = core.rot_matrix("x", 1.2) @ core.rot_matrix("z", -0.6) @ a.M
+a._apply_transform(center=True)
+a._invalidate()
+flat = [(-30, 20), (30, 20), (-30, -50), (30, -50)]     # grip right wall
+for x, z in flat:
+    a._on_click(FakeClick(a.ax_main, x, z + 5.0))
+assert len(a.level_pts) == 4
+tilt_before, rms_before = a._level_fit()
+print(f"level: tilt {tilt_before:.3f}° before, picks coplanar to "
+      f"±{rms_before:.3f} mm")
+assert 1.0 < tilt_before < 2.0, "should see the tilt we introduced"
+a.fig.savefig("gui_step2_level.png", dpi=100)
+a._on_level(None)
+tilt_after, _ = a._level_fit()
+print(f"level: tilt {tilt_after:.3f}° after")
+assert tilt_after < 0.05, "levelling should square the picked face to Y"
+# and the flat wall now reads the same thickness end to end
+lvl = a._level_map()
+ys = [core.sample_maps(lvl, x, z + 5.0)["hR"] for x, z in flat]
+print("right-face heights after levelling:", [round(v, 3) for v in ys])
+assert max(ys) - min(ys) < 0.15, ys
+# undo puts the orientation back
+a._on_level_undo(None)
+assert a._level_fit()[0] > 1.0
+a._on_level(None)                       # re-level for the rest of the run
+
+# --- step 3: silhouette
+a._set_step(appmod.S_SIL)
 a._on_extract(None)
 assert a.sil is not None
 a._on_dxf(None)
-a.fig.savefig("gui_step2_silhouette.png", dpi=100)
+a.fig.savefig("gui_step3_silhouette.png", dpi=100)
 
-# --- step 3: thickness tiers (two-sided, click driven)
-a._set_step(2)
+# --- step 4: thickness tiers (two-sided, click driven)
+a._set_step(appmod.S_TIERS)
 assert a.maps is not None and a.base_thickness is not None
 print("auto base:", a.base_thickness, "y0:", a.base_y0)
 
@@ -81,7 +110,7 @@ assert adds == sorted(adds[:2]) + sorted(adds[2:])
 for t in a.regions:
     exp = {"left": [5.0, 7.0], "right": [5.0, 7.0, 8.0]}[t["side"]]
     assert min(abs(t["add_mm"] - e) for e in exp) < 0.4, t
-a.fig.savefig("gui_step3_regions.png", dpi=100)
+a.fig.savefig("gui_step4_tiers.png", dpi=100)
 
 # the tier stack must cover the whole scan
 cov = core.coverage_report(a.maps, a.regions, a.base_thickness, a.base_y0)
@@ -168,19 +197,19 @@ a._apply_edits()
 assert a.base_thickness == 12.5
 a.tb_base.set_val(f"{12.09:g}")
 a._apply_edits()
-a.fig.savefig("gui_step3_regions.png", dpi=100)
+a.fig.savefig("gui_step4_tiers.png", dpi=100)
 
-# --- step 4: extras
-a._set_step(3)
+# --- step 5: extras
+a._set_step(appmod.S_EXTRAS)
 a.tb_yw.set_val("20"); a.tb_tilt.set_val("8"); a.tb_yc.set_val("0")
 a.add_extra_box(-25, zmin - 35, 15, zmax - 75)
 a.tb_dia.set_val("5"); a.tb_ylen.set_val("40")
 a.add_extra_cyl(55, zmax - 75)
 assert a.extras[-1]["yc"] == 0.0
-a.fig.savefig("gui_step4_extras.png", dpi=100)
+a.fig.savefig("gui_step5_extras.png", dpi=100)
 
-# --- step 5: CAD export (must not need a voxel build first)
-a._set_step(4)
+# --- step 6: CAD export (must not need a voxel build first)
+a._set_step(appmod.S_BUILD)
 a.tb_vox.set_val("0.35")
 a.tb_clr.set_val("0.15")
 a.tb_out.set_val("gui_frame_solid.stl")
@@ -196,7 +225,7 @@ sheet = open(os.path.join(cad, "build.txt"), encoding="utf-8").read()
 assert "R3_plus" in sheet and "clearance     : 0.15" in sheet
 print("CAD export OK:", sorted(os.listdir(cad)))
 
-# --- step 5: build + save
+# --- step 6: build + save
 a._on_build(None)
 assert a.result is not None
 bverts, _, rep, _ = a.result
@@ -213,11 +242,11 @@ print(f"boss faces in the built solid: {lo:+.2f} .. {hi:+.2f} "
       f"(expect ~-11.65 .. +13.65)")
 assert abs(lo - (-11.5 - 0.15)) < 0.35
 assert abs(hi - (13.5 + 0.15)) < 0.35
-a.fig.savefig("gui_step5_build.png", dpi=100)
+a.fig.savefig("gui_step6_build.png", dpi=100)
 
 # section radio + slider redraws
 a.sl_sec.set_val(0.4)
-a.fig.savefig("gui_step5_build_section.png", dpi=100)
+a.fig.savefig("gui_step6_build_section.png", dpi=100)
 
 a._on_save(None)
 
@@ -239,7 +268,7 @@ assert b.orig_verts is not None
 b._on_extract(None)
 assert b.sil is not None
 # a reloaded project rebuilds to the same thing without re-measuring
-b._set_step(4)
+b._set_step(appmod.S_BUILD)
 b.tb_vox.set_val("0.35")
 b._on_build(None)
 assert b.result is not None and b.result[2]["watertight"]

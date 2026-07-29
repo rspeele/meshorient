@@ -38,6 +38,27 @@ print(f"loaded: {len(verts)} verts, {len(faces)} tris")
 R = core.auto_orient(verts)
 verts_o = verts  # synthetic is already in datum pose (Y=0 mid-plane)
 
+# ---- levelling: a plane fit through picked points squares the scan up
+flat = np.array([[-30.0, 11.0, 20.0], [30.0, 11.0, 20.0],
+                 [-30.0, 11.0, -50.0], [30.0, 11.0, -50.0]])
+tilt_R = core.rot_matrix("x", 1.3) @ core.rot_matrix("z", -0.7)
+tilted = flat @ tilt_R.T
+R, tilt, rms = core.level_rotation(tilted)
+fixed = tilted @ R.T
+print(f"level: {tilt:.4f} deg of tilt found, picks coplanar to {rms:.2e} mm, "
+      f"y spread after {np.ptp(fixed[:, 1]):.2e} mm")
+assert rms < 1e-9, "a perfect plane must fit perfectly"
+assert np.ptp(fixed[:, 1]) < 1e-9, "levelled points must share one Y"
+assert abs(tilt - 1.478) < 0.01          # combined 1.3 deg X + 0.7 deg Z
+# levelling only removes tilt: it must not spin the frame about Y
+assert abs((R @ tilt_R)[1, 1] - 1.0) < 1e-9
+try:
+    core.level_rotation(flat[:2])
+except ValueError:
+    pass
+else:
+    raise AssertionError("two points cannot define a plane")
+
 # ---- silhouette
 sil = core.extract_silhouette(verts_o, faces, px=0.15, close_mm=1.5)
 print(f"silhouette: mask {sil.mask.shape}, polygon {len(sil.polygon)} pts")

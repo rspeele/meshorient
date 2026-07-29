@@ -83,6 +83,47 @@ def center_verts(verts: np.ndarray) -> np.ndarray:
     return verts - (lo + hi) / 2.0
 
 
+def fit_plane(points):
+    """Least-squares plane through >= 3 points.
+
+    Returns (unit normal, centroid, rms distance of the points from it).
+    """
+    P = np.asarray(points, float)
+    if len(P) < 3:
+        raise ValueError("need at least 3 points to fit a plane")
+    c = P.mean(axis=0)
+    _, _, vt = np.linalg.svd(P - c)
+    n = vt[-1]
+    return n, c, float(np.sqrt(np.mean(((P - c) @ n) ** 2)))
+
+
+def level_rotation(points, axis=1):
+    """Smallest rotation that squares a picked face up to the world axes.
+
+    PCA gets the orientation close, but a fraction of a degree of residual
+    tilt is enough to make one end of a flat side read thicker than the
+    other. Pick points on a face that really is flat and this rotates the
+    scan so that face becomes perpendicular to `axis` (default Y).
+
+    Returns (R, tilt_deg, rms_mm) — rms is how coplanar the picks actually
+    were, i.e. whether they were a fair sample of one flat face.
+    """
+    n, _, rms = fit_plane(points)
+    target = np.zeros(3)
+    target[axis] = 1.0
+    if n @ target < 0:
+        n = -n
+    v = np.cross(n, target)
+    s = float(np.linalg.norm(v))
+    if s < 1e-12:
+        return np.eye(3), 0.0, rms
+    k = v / s
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    th = float(np.arctan2(s, float(n @ target)))
+    R = np.eye(3) + np.sin(th) * K + (1 - np.cos(th)) * (K @ K)
+    return R, float(np.degrees(th)), rms
+
+
 # ============================================================= silhouette
 
 class Silhouette:
@@ -260,11 +301,19 @@ def _surface_samples(verts, faces, px, seed=0, max_per_tri=4096):
     return np.vstack([verts, pts])
 
 
-def measure_maps(verts, faces, sil: Silhouette, px=0.5) -> ThicknessMaps:
-    """Measure the scan's left/right face positions over the side view."""
+def measure_maps(verts, faces, sil: Silhouette = None, px=0.5) -> ThicknessMaps:
+    """Measure the scan's left/right face positions over the side view.
+
+    With no silhouette (the Level step, which runs before one exists) the
+    extent comes from the scan's own bounding box and nothing is masked out.
+    """
     pts = _surface_samples(verts, faces, px)
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
-    ex = sil.world_extent()
+    if sil is not None:
+        ex = sil.world_extent()
+    else:
+        pad = 3.0
+        ex = (x.min() - pad, x.max() + pad, z.min() - pad, z.max() + pad)
     x0, z0 = ex[0], ex[2]
     w = int(np.ceil((ex[1] - x0) / px)) + 1
     h = int(np.ceil((ex[3] - z0) / px)) + 1
@@ -274,7 +323,8 @@ def measure_maps(verts, faces, sil: Silhouette, px=0.5) -> ThicknessMaps:
 
     hL = (-ymin).reshape(h, w)               # positive outward, both sides
     hR = ymax.reshape(h, w)
-    sil_small = cv2.resize(sil.mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    sil_small = (cv2.resize(sil.mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                 if sil is not None else np.full((h, w), 255, np.uint8))
     return ThicknessMaps(_fill_gaps(hL, sil_small), _fill_gaps(hR, sil_small),
                          sil_small, x0, z0, px)
 

@@ -5,11 +5,16 @@ Run:  python app.py            (optionally: python app.py myproject.json)
 
 Steps (radio buttons, top right):
   1 Load/Orient — load scan, PCA auto-orient, fix with 90-deg rotations/flips.
-                  Goal: X = bore axis, Y = across frame (symmetry plane Y=0),
+                  Goal: X = bore axis, Y = across frame (mid-plane near Y=0),
                   Z = vertical. Views show the three projections.
-  2 Silhouette  — extract the side-view OUTER outline. Windows and holes are
+  2 Level       — square the scan up. PCA leaves a fraction of a degree of
+                  tilt, which is enough to make one end of a flat side read
+                  thicker than the other. Click 3+ points on a face that
+                  really is flat (right side of the frame) and LEVEL rotates
+                  the scan so that face is perpendicular to Y.
+  3 Silhouette  — extract the side-view OUTER outline. Windows and holes are
                   filled automatically. Export DXF for CAD tracing if wanted.
-  3 Tiers       — two views, one per side of the frame (the left one is
+  4 Tiers       — two views, one per side of the frame (the left one is
                   mirrored: it is the frame seen from its left). Each shows
                   only its own side's tiers. "Pick base" + a click on the
                   THINNEST part sets the base tier (the whole silhouette).
@@ -20,11 +25,11 @@ Steps (radio buttons, top right):
                   listed at the right: click a row (or right-click a view) to
                   select one; edit its height / noise margin / growth in the
                   boxes and press APPLY (or Enter) to commit.
-  4 Extras      — add clearance solids: drag = tilted box (mag path, levers),
+  5 Extras      — add clearance solids: drag = tilted box (mag path, levers),
                   click = Y-cylinder (grip screws, pins). Dims via text boxes
                   (they edit the LAST extra); y-mid offsets it off the
                   centreline for one-sided reliefs.
-  5 Build       — two ways out of the same tier model. "Export CAD (DXF)"
+  6 Build       — two ways out of the same tier model. "Export CAD (DXF)"
                   writes the sketches and their extrusion depths for
                   SolveSpace/OpenSCAD (no build needed — this is the lossless
                   one). "BUILD solid" is the voxel SDF preview and printable
@@ -48,7 +53,9 @@ from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 import core
 from meshio_lite import load_mesh, save_stl
 
-STEPS = ["1 Load/Orient", "2 Silhouette", "3 Tiers", "4 Extras", "5 Build"]
+STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Extras",
+         "6 Build"]
+S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXTRAS, S_BUILD = range(len(STEPS))
 SIDE_KEYS = ["left", "right"]
 SIDE_TAG = {"left": "L ", "right": " R"}
 
@@ -176,6 +183,9 @@ class App:
         self.offset = np.zeros(3)     # translation applied after M
         self.verts = None             # oriented verts (cache)
         self.sil = None               # core.Silhouette
+        self.level_pts = []           # [x,y,z] picks for the Level step
+        self.level_maps = None        # coarse maps for the Level view
+        self._pre_level = None        # (M, offset, picks) for Undo level
         self.maps = None              # core.ThicknessMaps (two-sided)
         self.base_thickness = None
         self.base_y0 = 0.0            # mid-plane of the base slab
@@ -228,7 +238,7 @@ class App:
         self._wy = 0.745
 
         # ---------- step 1 widgets
-        self.w1 = []
+        self.w1 = self.w_load = []
         r = slot()
         self.tb_path = TextBox(self.fig.add_axes(r), "scan ",
                                initial="synthetic_frame_scan.stl")
@@ -261,8 +271,24 @@ class App:
         self.w1 += [self.bt_flipx, self.bt_center]
 
         self._wy = 0.745
-        # ---------- step 2 widgets
-        self.w2 = []
+        # ---------- step 2 widgets (Level)
+        self.w_level = []
+        r = slot()
+        self.bt_level = Button(self.fig.add_axes(r),
+                               "LEVEL — square up on the picked points")
+        self.bt_level.on_clicked(self._on_level)
+        self.w_level.append(self.bt_level)
+        r = slot(split=(0.67, 0.145))
+        self.bt_lvl_clear = Button(self.fig.add_axes(r), "Clear points")
+        self.bt_lvl_clear.on_clicked(self._on_level_clear)
+        self.bt_lvl_undo = Button(self.fig.add_axes([0.835, r[1], 0.145, r[3]]),
+                                  "Undo level")
+        self.bt_lvl_undo.on_clicked(self._on_level_undo)
+        self.w_level += [self.bt_lvl_clear, self.bt_lvl_undo]
+
+        self._wy = 0.745
+        # ---------- step 3 widgets (Silhouette)
+        self.w2 = self.w_sil = []
         r = slot(split=(0.67, 0.095))
         self.tb_px = TextBox(self.fig.add_axes(r), "px mm ", initial="0.15")
         self.tb_close = TextBox(self.fig.add_axes([0.805, r[1], 0.06, r[3]]),
@@ -279,8 +305,8 @@ class App:
         self.w2 += [self.bt_extract, self.bt_dxf]
 
         self._wy = 0.745
-        # ---------- step 3 widgets
-        self.w3 = []
+        # ---------- step 4 widgets (Tiers)
+        self.w3 = self.w_tier = []
         r = slot(split=(0.715, 0.055))
         self.tb_base = TextBox(self.fig.add_axes(r), "base T ", initial="")
         self.tb_y0 = TextBox(self.fig.add_axes([0.805, r[1], 0.045, r[3]]),
@@ -332,8 +358,8 @@ class App:
         self.w3.append(self.lst)
 
         self._wy = 0.745
-        # ---------- step 4 widgets
-        self.w4 = []
+        # ---------- step 5 widgets (Extras)
+        self.w4 = self.w_extra = []
         r = slot(h=0.075)
         ax4 = self.fig.add_axes(r)
         self.radio_extra = RadioButtons(ax4, ["box (drag)", "cyl-Y (click)"],
@@ -366,8 +392,8 @@ class App:
         self.w4 += [self.bt_edel, self.bt_eclr]
 
         self._wy = 0.745
-        # ---------- step 5 widgets
-        self.w5 = []
+        # ---------- step 6 widgets (Build)
+        self.w5 = self.w_build = []
         r = slot(split=(0.67, 0.10))
         self.tb_vox = TextBox(self.fig.add_axes(r), "voxel ", initial="0.3")
         self.tb_clr = TextBox(self.fig.add_axes([0.85, r[1], 0.10, r[3]]),
@@ -410,6 +436,9 @@ class App:
         self.bt_psave.on_clicked(self._on_proj_save)
         self.bt_pload.on_clicked(self._on_proj_load)
 
+        self._groups = [self.w_load, self.w_level, self.w_sil, self.w_tier,
+                        self.w_extra, self.w_build]
+
         # ---------- selectors / events
         self.rsel = RectangleSelector(self.ax_main, self._on_rect,
                                       useblit=False, button=[1],
@@ -435,7 +464,7 @@ class App:
             w.set_active(flag)
 
     def _widgets_for(self, i):
-        return [self.w1, self.w2, self.w3, self.w4, self.w5][i]
+        return self._groups[i]
 
     def _set_step(self, i):
         self.step = i
@@ -445,21 +474,21 @@ class App:
                 self.radio_step.set_active(i)
             finally:
                 self._radio_guard = False
-        for group in (self.w1, self.w2, self.w3, self.w4, self.w5):
+        for group in self._groups:
             for w in group:
                 w.ax.set_visible(False)
                 self._enable(w, False)
         for w in self._widgets_for(i):
             w.ax.set_visible(True)
             self._enable(w, True)
-        show_orient = (i == 0)
-        show_tiers = (i == 2)
+        show_orient = (i == S_LOAD)
+        show_tiers = (i == S_TIERS)
         for ax in self.orient_axes:
             ax.set_visible(show_orient)
         for ax in self.tier_axes.values():
             ax.set_visible(show_tiers)
         self.ax_main.set_visible(not show_orient and not show_tiers)
-        self.rsel.set_active(i == 3)     # drag-a-box is step 4 only now
+        self.rsel.set_active(i == S_EXTRAS)   # drag-a-box is Extras only
         self._pick_base_armed = False
         if show_tiers:
             if self.sil is not None and self.maps is None:
@@ -496,7 +525,7 @@ class App:
 
     # ================================================== step 1: load/orient
     def _on_browse(self, _):
-        if self.step != 0:
+        if self.step != S_LOAD:
             return
         p = _try_filedialog()
         if p:
@@ -504,7 +533,7 @@ class App:
             self._on_load(None)
 
     def _on_load(self, _):
-        if self.step != 0:
+        if self.step != S_LOAD:
             return
         path = self.tb_path.text.strip()
         if not os.path.isfile(path):
@@ -520,6 +549,8 @@ class App:
         self.M = np.eye(3)
         self.offset = np.zeros(3)
         self._apply_transform(center=True)
+        self.level_pts = []
+        self._pre_level = None
         self._invalidate()
         self._status(f"Loaded {os.path.basename(path)}: "
                      f"{len(v)} verts, {len(f)} tris. Orient so that "
@@ -538,6 +569,7 @@ class App:
             return
         self.M = core.auto_orient(self.orig_verts)
         self._apply_transform(center=True)
+        self.level_pts = []
         self._invalidate()
         self._status("PCA auto-orient applied. Check all three views; fix "
                      "with the 90° buttons if axes are swapped/flipped.")
@@ -548,6 +580,7 @@ class App:
             return
         self.M = core.rot_matrix(axis, deg) @ self.M
         self._apply_transform(center=True)
+        self.level_pts = []
         self._invalidate()
         self._draw()
 
@@ -555,13 +588,96 @@ class App:
         if self.orig_verts is None:
             return
         self._apply_transform(center=True)
+        self.level_pts = []
         self._invalidate()
         self._draw()
 
     def _invalidate(self):
+        """Drop everything derived from the oriented scan."""
         self.sil = None
         self.maps = None
+        self.level_maps = None
         self.result = None
+
+    # ================================================== step 2: level
+    def _level_map(self):
+        """Coarse right-face map for the Level view (no silhouette yet)."""
+        if self.level_maps is None and self.verts is not None:
+            with self._busy("measuring surface…"):
+                self.level_maps = core.measure_maps(
+                    self.verts, self.orig_faces, None, px=0.8)
+        return self.level_maps
+
+    def _level_fit(self):
+        """(tilt_deg, rms_mm) of the current picks, or None if under 3."""
+        if len(self.level_pts) < 3:
+            return None
+        _, tilt, rms = core.level_rotation(np.asarray(self.level_pts, float))
+        return tilt, rms
+
+    def pick_level_point(self, x, z):
+        """Record where the scan's RIGHT face sits under a clicked XZ point."""
+        maps = self._level_map()
+        if maps is None:
+            self._status("Load a scan first (step 1).")
+            return
+        s = core.sample_maps(maps, x, z, r_mm=1.2)
+        if s is None:
+            self._status("No scan surface there — click on the frame.")
+            return
+        self.level_pts.append([float(x), float(s["hR"]), float(z)])
+        fit = self._level_fit()
+        extra = ""
+        if fit:
+            extra = (f"  Plane through {len(self.level_pts)} points: tilt "
+                     f"{fit[0]:.2f}°, points coplanar to ±{fit[1]:.3f} mm. "
+                     f"Press LEVEL.")
+        self._status(f"Point {len(self.level_pts)} at X={x:.1f}, Z={z:.1f} — "
+                     f"right face y={s['hR']:+.3f}.{extra}")
+        self._draw()
+
+    def _on_level_clear(self, _):
+        if self.step != S_LEVEL:
+            return
+        self.level_pts = []
+        self._status("Picks cleared.")
+        self._draw()
+
+    def _on_level(self, _):
+        if self.step != S_LEVEL:
+            return
+        if len(self.level_pts) < 3:
+            self._status("Pick at least 3 points on a flat part of the "
+                         "frame's right side first.")
+            return
+        pts = np.asarray(self.level_pts, float)
+        R, tilt, rms = core.level_rotation(pts)
+        self._pre_level = (self.M.copy(), self.offset.copy(), pts.copy())
+        off_old = self.offset.copy()
+        with self._busy("levelling…"):
+            self.M = R @ self.M
+            self._apply_transform(center=True)
+            # carry the picks into the new frame, so you can level again
+            self.level_pts = ((pts - off_old) @ R.T + self.offset).tolist()
+            self._invalidate()
+        after = self._level_fit()
+        self._status(f"Levelled: rotated {tilt:.3f}° so the picked face is "
+                     f"square to Y. The {len(pts)} points were coplanar to "
+                     f"±{rms:.3f} mm (that is your scan's own flatness) and "
+                     f"now sit within {after[1] * 2:.3f} mm of one Y. "
+                     f"Re-extract the silhouette in step 3.")
+        self._draw()
+
+    def _on_level_undo(self, _):
+        if self.step != S_LEVEL or self._pre_level is None:
+            return
+        self.M, self.offset, pts = self._pre_level
+        self._pre_level = None
+        self.verts = self.orig_verts @ self.M.T + self.offset
+        self.level_pts = pts.tolist()
+        self._invalidate()
+        self._status("Levelling undone — orientation is back as it was.")
+        self._draw()
 
     # ================================================== step 2: silhouette
     def _on_extract(self, _):
@@ -605,6 +721,9 @@ class App:
             t, y0 = core.base_from_maps(self.maps)
             self.base_thickness = round(t, 2) if t else 20.0
             self.base_y0 = round(y0, 2)
+        # the maps just changed (new scan, new orientation, new silhouette),
+        # so every tier outline cut from the old ones is stale
+        self._resegment()
         self._sync_boxes()
 
     # ================================================== step 3: regions
@@ -712,7 +831,7 @@ class App:
         return None
 
     def _on_pick_base(self, _):
-        if self.step != 2:
+        if self.step != S_TIERS:
             return
         if self.maps is None:
             self._status("Extract a silhouette first (step 2).")
@@ -783,7 +902,7 @@ class App:
         Nothing in step 3 re-cuts on focus change, so you can tab around the
         boxes freely and pay for the update exactly once, when you say so.
         """
-        if self.step != 2:
+        if self.step != S_TIERS:
             return
         changes = []
         try:
@@ -834,7 +953,7 @@ class App:
 
     def _on_key(self, event):
         """Enter applies, wherever the keyboard focus happens to be."""
-        if event.key in ("enter", "return") and self.step == 2:
+        if event.key in ("enter", "return") and self.step == S_TIERS:
             self._apply_edits()
 
     def _on_remeasure(self, _):
@@ -853,7 +972,7 @@ class App:
         self._draw()
 
     def _on_region_del(self, _):
-        if self.step != 2 or not self.regions:
+        if self.step != S_TIERS or not self.regions:
             return
         i = self.sel if self.sel is not None else len(self.regions) - 1
         with self._busy("deleting tier…"):
@@ -865,7 +984,7 @@ class App:
         self._select(self.sel)
 
     def _on_region_clr(self, _):
-        if self.step != 2:
+        if self.step != S_TIERS:
             return
         self.regions = []
         self.sel = None
@@ -947,7 +1066,7 @@ class App:
         x1, z1 = erelease.xdata, erelease.ydata
         if None in (x0, z0, x1, z1):
             return
-        if self.step == 3 and self.extra_kind.startswith("box"):
+        if self.step == S_EXTRAS and self.extra_kind.startswith("box"):
             self.add_extra_box(x0, z0, x1, z1)
 
     def _toolbar_idle(self):
@@ -960,7 +1079,11 @@ class App:
         if event.xdata is None or event.ydata is None:
             return
         x, z = event.xdata, event.ydata
-        if self.step == 2:                       # tiers: one view per side
+        if self.step == S_LEVEL:
+            if event.inaxes is self.ax_main and event.button == 1:
+                self.pick_level_point(x, z)
+            return
+        if self.step == S_TIERS:                 # one view per side
             side = next((s for s, ax in self.tier_axes.items()
                          if event.inaxes is ax), None)
             if side is None:
@@ -972,7 +1095,7 @@ class App:
                     self.pick_base_at(x, z)
                 else:
                     self.add_region(x, z, side)
-        elif (self.step == 3 and event.inaxes is self.ax_main
+        elif (self.step == S_EXTRAS and event.inaxes is self.ax_main
                 and event.button == 1 and self.extra_kind.startswith("cyl")):
             self.add_extra_cyl(x, z)
 
@@ -1062,6 +1185,7 @@ class App:
                      "simplify": self.tb_simp.text},
              "base_thickness": self.base_thickness,
              "base_y0": self.base_y0,
+             "level_pts": [list(map(float, p)) for p in self.level_pts],
              "map_px": self.tb_mpx.text,
              "regions": self.regions, "extras": self.extras,
              "build": {"voxel": self.tb_vox.text,
@@ -1089,6 +1213,7 @@ class App:
         # base_width is the pre-two-sided key name
         self.base_thickness = d.get("base_thickness", d.get("base_width"))
         self.base_y0 = float(d.get("base_y0", 0.0))
+        self.level_pts = [list(p) for p in d.get("level_pts", [])]
         self.regions = d.get("regions", [])
         self.extras = d.get("extras", [])
         self.sel = len(self.regions) - 1 if self.regions else None
@@ -1125,7 +1250,7 @@ class App:
         ax.tick_params(labelsize=7)
 
     def _draw(self):
-        if self.step == 0:
+        if self.step == S_LOAD:
             if self.verts is not None:
                 v = self.verts
                 self._hist2d(self.ax_side, v[:, 0], v[:, 2],
@@ -1143,7 +1268,7 @@ class App:
             self.fig.canvas.draw_idle()
             return
 
-        if self.step == 2:      # tiers — one independent view per side
+        if self.step == S_TIERS:   # tiers — one independent view per side
             self._draw_tiers()
             self.fig.canvas.draw_idle()
             return
@@ -1151,7 +1276,35 @@ class App:
         ax = self.ax_main
         ax.clear()
 
-        if self.step == 1:      # silhouette
+        if self.step == S_LEVEL:
+            maps = self._level_map()
+            if maps is not None:
+                m = maps.hR
+                finite = m[np.isfinite(m)]
+                vmin, vmax = (np.percentile(finite, [2, 98]) if finite.size
+                              else (0.0, 1.0))
+                if vmax - vmin < 1e-6:
+                    vmax = vmin + 1.0
+                ax.imshow(m, origin="lower", cmap="coolwarm", vmin=vmin,
+                          vmax=vmax, extent=maps.world_extent())
+                for i, p in enumerate(self.level_pts):
+                    ax.plot([p[0]], [p[2]], "kx", ms=11, mew=2.5)
+                    ax.text(p[0] + 1.5, p[2] + 1.5, f"{i+1}: {p[1]:+.2f}",
+                            fontsize=8, weight="bold")
+                fit = self._level_fit()
+                verdict = (f"tilt {fit[0]:.2f}°, coplanar to ±{fit[1]:.3f} mm"
+                           if fit else
+                           f"{len(self.level_pts)}/3 points picked")
+                ax.set_title(
+                    f"RIGHT face height, {vmin:.1f}–{vmax:.1f} mm — a tilt "
+                    f"reads as a gradient across a flat face\n"
+                    f"click 3+ points on one flat face · {verdict}",
+                    fontsize=10)
+            else:
+                ax.set_title("Load a scan first (step 1)")
+            ax.set_aspect("equal")
+
+        elif self.step == S_SIL:      # silhouette
             if self.sil is not None:
                 ex = self.sil.world_extent()
                 ax.imshow(self.sil.mask, origin="lower", extent=ex,
@@ -1166,7 +1319,7 @@ class App:
                 ax.set_title("Press 'Extract silhouette'")
             ax.set_aspect("equal")
 
-        elif self.step == 3:    # extras
+        elif self.step == S_EXTRAS:    # extras
             if self.sil is not None:
                 ex = self.sil.world_extent()
                 ax.imshow(self.sil.mask, origin="lower", extent=ex,
@@ -1195,7 +1348,7 @@ class App:
                          "(kind set at right; y-mid offsets it off centre)")
             ax.set_aspect("equal")
 
-        elif self.step == 4:    # build
+        elif self.step == S_BUILD:    # build
             if self.result is not None:
                 _, _, rep, pack = self.result
                 sdf, (xlo, ylo, zlo), vox = pack
