@@ -207,6 +207,28 @@ assert not a.txt_busy.get_visible()
 a.tb_grow.set_val("0")
 a._apply_edits()
 
+# Interacting with a text box must not repaint the whole figure. matplotlib
+# calls TextBox.stop_typing() on every box that was NOT clicked, and each of
+# those did a full canvas.draw(): 7 renders (~1.5 s on this figure) before
+# the cursor even appeared, plus one per keystroke.
+from matplotlib.backend_bases import MouseEvent, KeyEvent
+_draws = [0]
+_real_draw = a.fig.canvas.draw
+a.fig.canvas.draw = lambda *x, **k: (_draws.__setitem__(0, _draws[0] + 1),
+                                     _real_draw(*x, **k))[1]
+_bb = a.tb_over.ax.get_window_extent()
+_x, _y = _bb.x0 + _bb.width / 2, _bb.y0 + _bb.height / 2
+MouseEvent("motion_notify_event", a.fig.canvas, _x, _y)._process()   # hover
+MouseEvent("button_press_event", a.fig.canvas, _x, _y, button=1)._process()
+for _ch in "45":
+    KeyEvent("key_press_event", a.fig.canvas, _ch)._process()
+a.fig.canvas.draw = _real_draw
+assert a.tb_over.text.endswith("45"), a.tb_over.text   # the keys landed
+assert _draws[0] == 0, f"{_draws[0]} full figure redraws for one click + 2 keys"
+print("widget interaction does no full redraws")
+a.tb_over.stop_typing()
+a.tb_over.set_val("0.3")
+
 # deleting a middle tier re-cuts the one above it (its threshold drops)
 a._select(3)                        # right rail tier
 rail_thr = a.regions[3]["threshold_mm"]

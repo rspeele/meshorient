@@ -53,24 +53,92 @@ from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 import core
 from meshio_lite import load_mesh
 
-def _fix_mpl_textbox_resize():
-    """Work around a matplotlib bug (present in 3.11.0).
+def _blit_widget(w):
+    """Repaint just this widget's own axes, not the whole figure."""
+    canvas = w.ax.get_figure(root=True).canvas
+    if getattr(canvas, "supports_blit", False):
+        try:
+            w.ax.draw_artist(w.ax)
+            canvas.blit(w.ax.bbox)
+            return
+        except Exception:
+            pass                       # backend can't blit — fall back
+    canvas.draw_idle()
 
-    TextBox connects _resize to 'resize_event', but _resize is decorated with
-    the mouse-event reparenting wrapper, which reads event.inaxes. A
-    ResizeEvent has no inaxes, so every window resize raises AttributeError
-    once per text box — fifteen tracebacks on the console per drag here.
-    The wrapper adds nothing to _resize (it only calls stop_typing and
-    ignores the event), so unwrap it. Self-disabling once upstream drops the
-    decorator: without one there is no __wrapped__ to restore.
+
+def _repaint_widget_only(method):
+    """Run a widget method with canvas.draw() redirected to a blit.
+
+    Reuses matplotlib's own logic rather than reimplementing it; only the
+    repaint at the end is swapped. Full draws still happen if the figure has
+    never been rendered (nothing to blit onto).
     """
-    fn = getattr(TextBox, "_resize", None)
-    inner = getattr(fn, "__wrapped__", None)
+    def wrapper(self, *args, **kwargs):
+        fig = self.ax.get_figure(root=True)
+        canvas = fig.canvas
+        real_draw = canvas.draw
+
+        def cheap_draw(*a, **k):
+            if fig._get_renderer() is None:
+                return real_draw(*a, **k)
+            _blit_widget(self)
+
+        canvas.draw = cheap_draw
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            canvas.draw = real_draw
+    wrapper._f2s_patched = True
+    return wrapper
+
+
+def _patch_matplotlib_textbox():
+    """Work around matplotlib TextBox problems (checked against 3.11.0).
+
+    1. `_resize` is connected to 'resize_event' but decorated with the
+       mouse-event reparenting wrapper, which reads event.inaxes. A
+       ResizeEvent has none, so every window resize raised AttributeError
+       once per text box — fifteen tracebacks per drag here.
+
+    2. TextBox repaints by calling canvas.draw(), a full figure render. This
+       figure takes ~200 ms to render, and matplotlib calls stop_typing() on
+       every box that was NOT the one clicked, so a single click into a text
+       box cost 7 full renders — over a second before the cursor appeared,
+       and another render per keystroke. Button already blits its hover
+       repaint (`useblit`); TextBox simply never got the same treatment. So:
+         - stop_typing: return early when there is nothing to stop, which is
+           the case for every box except the one you were typing in;
+         - _motion (hover tint) and _rendercursor (click, and every
+           keystroke): repaint that widget's axes only.
+
+    Each patch is skipped if it has already been applied or if upstream has
+    changed the code out from under it.
+    """
+    tb = getattr(TextBox, "_resize", None)
+    inner = getattr(tb, "__wrapped__", None)
     if inner is not None:
         TextBox._resize = inner
 
+    if not getattr(TextBox.stop_typing, "_f2s_patched", False):
+        _stop_typing = TextBox.stop_typing
 
-_fix_mpl_textbox_resize()
+        def stop_typing(self):
+            # not typing and no cursor showing: the original would change
+            # nothing and then repaint the whole figure anyway
+            if not self.capturekeystrokes and not self.cursor.get_visible():
+                return
+            _stop_typing(self)
+
+        stop_typing._f2s_patched = True
+        TextBox.stop_typing = _repaint_widget_only(stop_typing)
+
+    for name in ("_motion", "_rendercursor"):
+        method = getattr(TextBox, name, None)
+        if method is not None and not getattr(method, "_f2s_patched", False):
+            setattr(TextBox, name, _repaint_widget_only(method))
+
+
+_patch_matplotlib_textbox()
 
 STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Extras",
          "6 Export"]
@@ -205,7 +273,13 @@ def _try_filedialog(save=False, initial=""):
 
 class App:
     def __init__(self):
-        self.fig = plt.figure("frame2solid", figsize=(15, 8.5))
+        # NOT plt.figure("frame2solid"): a string num is a figure *label*, so
+        # a second App would be handed the first one's figure and pile its
+        # widgets onto that canvas — both apps' widgets then answer every
+        # click. The name belongs on the window, not on the figure identity.
+        self.fig = plt.figure(figsize=(15, 8.5))
+        if self.fig.canvas.manager is not None:
+            self.fig.canvas.manager.set_window_title("frame2solid")
 
         # ---------- state
         self.scan_path = ""

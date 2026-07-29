@@ -120,13 +120,29 @@ printing for fit prototypes.
   number. The steps have been renumbered twice and stale references only
   surface when a user hits that specific error. test_gui asserts app.py
   contains no literal "(step ".
-- `app._fix_mpl_textbox_resize()` unwraps matplotlib's TextBox._resize at
-  import. In matplotlib 3.11.0 it is connected to 'resize_event' but
-  decorated with the mouse-event reparenting wrapper, which reads
-  event.inaxes — ResizeEvent has none, so every window resize printed one
-  AttributeError traceback per text box. It restores the undecorated method
-  (which only calls stop_typing) and no-ops on versions without the
-  decorator. test_gui fires a ResizeEvent to keep it honest.
+- `app._patch_matplotlib_textbox()` fixes two matplotlib TextBox problems
+  at import (checked against 3.11.0); both are covered by test_gui, which
+  fires real MouseEvent/KeyEvent/ResizeEvent objects:
+  - `_resize` is connected to 'resize_event' but decorated with the
+    mouse-event reparenting wrapper, which reads event.inaxes. ResizeEvent
+    has none, so every window resize printed one AttributeError traceback
+    per text box. Restores the undecorated method.
+  - TextBox repaints via canvas.draw() — a FULL figure render, ~200 ms
+    here. matplotlib calls stop_typing() on every box that was NOT the one
+    clicked, so one click into a text box cost 7 full renders (~1.5 s
+    before the cursor appeared) plus one per keystroke. Button already
+    blits its repaint (`useblit=True`); TextBox never got the same
+    treatment. The patch makes stop_typing return early when there is
+    nothing to stop, and routes _motion/_rendercursor through
+    `_repaint_widget_only`, which redirects canvas.draw() to a blit of that
+    widget's own axes. Measured after: 0 full renders for a click, 20 ms.
+  - If you add a widget-heavy step, keep an eye on this: the whole figure
+    is ~240 text artists and text is 60% of a render.
+- App() must NOT use `plt.figure("frame2solid")`. A string `num` is a
+  figure LABEL, so a second App is handed the first one's figure and piles
+  its ~50 axes onto that canvas — both apps' widgets then answer every
+  click (this bit the tests, which build three Apps). The name goes on the
+  window via canvas.manager.set_window_title().
 - RadioButtons.set_active also fires callbacks — _radio_guard prevents
   recursion when syncing the step radio programmatically. TextBox.set_val
   fires on_submit too: App._sync guards every programmatic box update.
