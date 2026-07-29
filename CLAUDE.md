@@ -115,6 +115,18 @@ printing for fit prototypes.
   means "select option i", so those get `w._active = flag` instead. If you add
   a widget to any step, add it to that step's wN list or it will intercept
   clicks on every other step.
+- Any message that points the user at another step must build the reference
+  with `app.step_ref(S_*)` ("step 3 (Silhouette)"), never a hand-written
+  number. The steps have been renumbered twice and stale references only
+  surface when a user hits that specific error. test_gui asserts app.py
+  contains no literal "(step ".
+- `app._fix_mpl_textbox_resize()` unwraps matplotlib's TextBox._resize at
+  import. In matplotlib 3.11.0 it is connected to 'resize_event' but
+  decorated with the mouse-event reparenting wrapper, which reads
+  event.inaxes — ResizeEvent has none, so every window resize printed one
+  AttributeError traceback per text box. It restores the undecorated method
+  (which only calls stop_typing) and no-ops on versions without the
+  decorator. test_gui fires a ResizeEvent to keep it honest.
 - RadioButtons.set_active also fires callbacks — _radio_guard prevents
   recursion when syncing the step radio programmatically. TextBox.set_val
   fires on_submit too: App._sync guards every programmatic box update.

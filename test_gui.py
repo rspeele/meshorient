@@ -18,6 +18,31 @@ class FakeClick:
     def __init__(self, ax, x, y, button=1):
         self.inaxes, self.xdata, self.ydata, self.button = ax, x, y, button
 
+# --- messages that point at another step must name the right one. The steps
+# have been renumbered twice and a stale "(step 2)" only surfaces when a user
+# happens to hit that error, so derive them from STEPS via step_ref().
+assert "(step " not in open("app.py", encoding="utf-8").read(), \
+    "hand-written step number in a message — use step_ref(S_*)"
+assert appmod.step_ref(appmod.S_SIL) == "step 3 (Silhouette)"
+_probe = appmod.App()
+_probe._set_step(appmod.S_TIERS)
+_probe._on_pick_base(None)          # nothing extracted yet
+assert appmod.step_ref(appmod.S_SIL) in _probe.txt_status.get_text(), \
+    _probe.txt_status.get_text()
+_probe._set_step(appmod.S_LEVEL)
+_probe.pick_level_point(0, 0)       # nothing loaded yet
+assert appmod.step_ref(appmod.S_LOAD) in _probe.txt_status.get_text(), \
+    _probe.txt_status.get_text()
+print("step references OK")
+
+# --- resizing the window must be silent. matplotlib 3.11 decorates
+# TextBox._resize with the mouse-event wrapper, so a ResizeEvent used to
+# raise AttributeError once per text box (headless, mpl re-raises rather
+# than printing, so this asserts by not blowing up).
+from matplotlib.backend_bases import ResizeEvent
+ResizeEvent("resize_event", a.fig.canvas)._process()
+print("resize event clean")
+
 # --- step 1: load + orient
 a.tb_path.set_val("synthetic_frame_scan.stl")
 a._on_load(None)

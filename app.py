@@ -53,9 +53,41 @@ from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 import core
 from meshio_lite import load_mesh
 
+def _fix_mpl_textbox_resize():
+    """Work around a matplotlib bug (present in 3.11.0).
+
+    TextBox connects _resize to 'resize_event', but _resize is decorated with
+    the mouse-event reparenting wrapper, which reads event.inaxes. A
+    ResizeEvent has no inaxes, so every window resize raises AttributeError
+    once per text box — fifteen tracebacks on the console per drag here.
+    The wrapper adds nothing to _resize (it only calls stop_typing and
+    ignores the event), so unwrap it. Self-disabling once upstream drops the
+    decorator: without one there is no __wrapped__ to restore.
+    """
+    fn = getattr(TextBox, "_resize", None)
+    inner = getattr(fn, "__wrapped__", None)
+    if inner is not None:
+        TextBox._resize = inner
+
+
+_fix_mpl_textbox_resize()
+
 STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Extras",
          "6 Export"]
 S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXTRAS, S_EXPORT = range(len(STEPS))
+
+
+def step_ref(i):
+    """'step 3 (Silhouette)'.
+
+    Never hand-write a step number in a message: the steps have been
+    renumbered twice and the stale references only surface when a user hits
+    that particular error.
+    """
+    num, _, name = STEPS[i].partition(" ")
+    return f"step {num} ({name})"
+
+
 SIDE_KEYS = ["left", "right"]
 SIDE_TAG = {"left": "L ", "right": " R"}
 
@@ -214,9 +246,9 @@ class App:
         self.POS_L_MAIN = [0.05, 0.34, 0.45, 0.58]
         self.POS_L_FRONT = [0.525, 0.34, 0.11, 0.58]
         self.POS_L_TOP = [0.05, 0.15, 0.45, 0.19]
-        # step 3 shows the two sides as separate views. The left one is
-        # mirrored in X, so it is what you see standing on the frame's left —
-        # not the right-hand view with the far side showing through.
+        # the Tiers step shows the two sides as separate views. The left
+        # one is mirrored in X, so it is what you see standing on the
+        # frame's left, not the right-hand view with the far side through.
         self.ax_tier_L = self.fig.add_axes([0.045, 0.16, 0.29, 0.76])
         self.ax_tier_R = self.fig.add_axes([0.345, 0.16, 0.29, 0.76])
         self.tier_axes = {"left": self.ax_tier_L, "right": self.ax_tier_R}
@@ -619,7 +651,7 @@ class App:
         """Record where the scan's RIGHT face sits under a clicked XZ point."""
         maps = self._level_map()
         if maps is None:
-            self._status("Load a scan first (step 1).")
+            self._status(f"Load a scan first — {step_ref(S_LOAD)}.")
             return
         s = core.sample_maps(maps, x, z, r_mm=1.2)
         if s is None:
@@ -665,7 +697,7 @@ class App:
                      f"square to Y. The {len(pts)} points were coplanar to "
                      f"±{rms:.3f} mm (that is your scan's own flatness) and "
                      f"now sit within {after[1] * 2:.3f} mm of one Y. "
-                     f"Re-extract the silhouette in step 3.")
+                     f"Re-extract the silhouette: {step_ref(S_SIL)}.")
         self._draw()
 
     def _on_level_undo(self, _):
@@ -679,10 +711,10 @@ class App:
         self._status("Levelling undone — orientation is back as it was.")
         self._draw()
 
-    # ================================================== step 2: silhouette
+    # ================================================== step 3: silhouette
     def _on_extract(self, _):
         if self.verts is None:
-            self._status("Load a scan first (step 1).")
+            self._status(f"Load a scan first — {step_ref(S_LOAD)}.")
             return
         try:
             px = float(self.tb_px.text)
@@ -726,7 +758,7 @@ class App:
         self._resegment()
         self._sync_boxes()
 
-    # ================================================== step 3: regions
+    # ================================================== step 4: tiers
     def _selected(self):
         if self.sel is None or not 0 <= self.sel < len(self.regions):
             return None
@@ -834,7 +866,7 @@ class App:
         if self.step != S_TIERS:
             return
         if self.maps is None:
-            self._status("Extract a silhouette first (step 2).")
+            self._status(f"Extract a silhouette first — {step_ref(S_SIL)}.")
             return
         self._pick_base_armed = True
         self._status("Click the THINNEST part of the frame — its measured "
@@ -863,7 +895,7 @@ class App:
     def add_region(self, x, z, side="right"):
         """Add a tier on `side`, picked at world XZ."""
         if self.maps is None:
-            self._status("Extract a silhouette first (step 2).")
+            self._status(f"Extract a silhouette first — {step_ref(S_SIL)}.")
             return
         if self.base_thickness is None:
             self._status("Set the base thickness first.")
@@ -899,8 +931,9 @@ class App:
     def _apply_edits(self, _=None):
         """Commit the text boxes — the Apply button, or Enter in any of them.
 
-        Nothing in step 3 re-cuts on focus change, so you can tab around the
-        boxes freely and pay for the update exactly once, when you say so.
+        Nothing in the Tiers step re-cuts on focus change, so you can tab
+        around the boxes freely and pay for the update exactly once, when
+        you say so.
         """
         if self.step != S_TIERS:
             return
@@ -958,7 +991,7 @@ class App:
 
     def _on_remeasure(self, _):
         if self.sil is None:
-            self._status("Extract a silhouette first (step 2).")
+            self._status(f"Extract a silhouette first — {step_ref(S_SIL)}.")
             return
         with self._busy("re-measuring scan…"):
             self._compute_maps()
@@ -991,7 +1024,7 @@ class App:
         self.model = None
         self._select(None)
 
-    # ================================================== step 4: extras
+    # ================================================== step 5: extras
     def _on_extra_kind(self, label):
         self.extra_kind = label
 
@@ -1115,10 +1148,10 @@ class App:
 
     def _on_export_cad(self, _):
         if self.sil is None:
-            self._status("Need a silhouette first (step 3).")
+            self._status(f"Need a silhouette first — {step_ref(S_SIL)}.")
             return
         if self.base_thickness is None:
-            self._status("Set the base thickness first (step 4).")
+            self._status(f"Set the base thickness first — {step_ref(S_TIERS)}.")
             return
         try:
             clr = float(self.tb_clr.text)
@@ -1198,7 +1231,7 @@ class App:
             self.maps = None
             self.model = None
             self._status(f"Project loaded; scan reloaded ({len(v)} verts). "
-                         f"Re-run step 2 (Extract) to continue.")
+                         f"Re-run {step_ref(S_SIL)} to continue.")
         else:
             self._status("Project loaded (scan file not found — load manually).")
         self._draw()
@@ -1267,7 +1300,7 @@ class App:
                     f"click 3+ points on one flat face · {verdict}",
                     fontsize=9)
             else:
-                ax.set_title("Load a scan first (step 1)")
+                ax.set_title(f"Load a scan first — {step_ref(S_LOAD)}")
             ax.set_aspect("equal")
             self._draw_level_aux()
 
@@ -1399,7 +1432,7 @@ class App:
                            if about_z is not None else ""), fontsize=9)
 
     def _draw_tiers(self):
-        """Step 3: the two sides as separate views, each with its own tiers."""
+        """The Tiers step: one view per side, each with its own tiers."""
         if self.maps is None and self.sil is not None:
             with self._busy("measuring scan…"):
                 self._compute_maps()
@@ -1407,7 +1440,8 @@ class App:
             ax.clear()
             ax.tick_params(labelsize=7)
             if self.maps is None:
-                ax.set_title("Extract a silhouette first (step 2)", fontsize=10)
+                ax.set_title(f"Extract a silhouette first — {step_ref(S_SIL)}",
+                             fontsize=10)
                 continue
             m = self.maps.face_map(side)
             finite = m[np.isfinite(m)]
