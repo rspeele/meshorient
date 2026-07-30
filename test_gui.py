@@ -331,11 +331,65 @@ assert [(t["area_mm2"], len(t["polys"])) for t in a.regions] == _before, \
     "refining for export must not disturb the tiers you are editing"
 for _o, _n in zip(a.regions, _fine):
     assert _n is not _o
-    assert abs(_n["area_mm2"] - _o["area_mm2"]) < 0.06 * _o["area_mm2"]
+    # asymmetric, and for the same reason _refined_regions' own guard is:
+    # a finer raster is SUPPOSED to shed the conservative half-pixel bias, and
+    # that is worth more than 6% on a small high-perimeter island
+    _allow = max(0.06 * _o["area_mm2"],
+                 core.raster_bias_bound(_o["polys"], a.maps.px, 0.2))
+    assert -_allow < _n["area_mm2"] - _o["area_mm2"] < 0.06 * _o["area_mm2"], \
+        (_n["side"], _n["add_mm"], _o["area_mm2"], _n["area_mm2"], _allow)
 a.tb_epx.set_val("1.0")          # coarser than the map: no re-cut at all
 assert a._refined_regions()[1] == ""
 a.tb_epx.set_val("0.2")
+# no tier may be reverted here: every one of these sheds only what the raster
+# accounts for. A flat 5% guard reverted a 30 mm-proud rod end on a real
+# project, and its coarse outline was too crude for fit_circle — so the same
+# rod came out round on one side of the frame and faceted on the other.
+assert "kept their step-4 outlines" not in _note, _note
 print("export re-cut OK")
+
+# --- round islands go out as true CIRCLE entities, and the box switches it off
+def _dxf_circles(folder):
+    n = 0
+    for f in sorted(os.listdir(folder)):
+        if not f.endswith(".dxf") or f == "all_sketches.dxf":
+            continue
+        with open(os.path.join(folder, f)) as fh:
+            n += sum(1 for ln in fh if ln.strip() == "CIRCLE")
+    return n
+
+
+a.tb_cfit.set_val("0.3")
+a._on_export_cad(None)
+_with = _dxf_circles(cad)
+a.tb_cfit.set_val("0")
+a._on_export_cad(None)
+_without = _dxf_circles(cad)
+print(f"circle fit: {_with} CIRCLE entities on, {_without} off "
+      f"(the cylinder extra is always one)")
+# the round boss appears in its own tier and the one below, plus the cyl extra
+assert _with == 3, _with
+assert _without == 1, "circle fit 0 must leave only the cylinder extra"
+
+def _sheet_circles(folder):
+    """The build sheet's circle table, one row per exported CIRCLE."""
+    txt = open(os.path.join(folder, "build.txt"), encoding="utf-8").read()
+    if "circles (" not in txt:
+        return []
+    return [ln for ln in txt.split("circles (")[1].splitlines()
+            if " centre (" in ln]
+
+
+# the cylinder extra is always a circle, so the table is there either way —
+# what the box changes is whether the tiers' round islands join it
+assert len(_sheet_circles(cad)) == _without == 1, _sheet_circles(cad)
+a.tb_cfit.set_val("0.3")
+a._on_export_cad(None)
+_rows = _sheet_circles(cad)
+assert len(_rows) == _with == 3, _rows
+assert all("dia" in ln for ln in _rows)
+assert "round island(s) are true CIRCLE entities" in open(
+    os.path.join(cad, "build.txt"), encoding="utf-8").read()
 print("CAD export OK:", sorted(os.listdir(cad)))
 # the export step previews every sketch it is about to write
 assert a.model is not None and len(a.model) == 1 + 7 + 2

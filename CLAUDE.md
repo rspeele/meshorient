@@ -35,8 +35,41 @@ printing for fit prototypes.
 - The export re-cuts the tiers on a finer raster than step 4 uses
   (`App._refined_regions`, `export px`, default 0.2 mm vs the 0.5 mm working
   map). It works on COPIES so the interactive state is untouched, and if a
-  tier's area moves by more than 5% it keeps its step-4 outline and says so —
-  refining is meant to move edges, not change what is included.
+  tier's area moves by more than it should it keeps its step-4 outline and says
+  so — refining is meant to move edges, not change what is included.
+  The allowance is `max(5%, core.raster_bias_bound(...))`, NOT a flat 5%.
+  Conservative rasterisation puts half a pixel of outward bias on every
+  outline, worth `perimeter * px / 2` of area, and shedding it is the finer
+  measurement doing its job. Because that bias scales with PERIMETER while the
+  guard compares AREA, it is proportionally huge for a small island with a long
+  boundary: a 30 mm-proud rod end (91.8 mm², 77.5 mm of perimeter) legitimately
+  loses 14.1% between 0.5 and 0.2 mm/px. A flat 5% guard reverted it to the
+  coarse outline, whose islands were too crude for `fit_circle` — so the same
+  rod, one body passed straight through the frame, exported as a true circle on
+  one side and a faceted polygon on the other (user-reported, via OpenSCAD).
+  A wholesale collapse still trips the guard: the bound is a couple of percent
+  for a large footprint, nowhere near the 40% a broken `_fill_gaps` once cost.
+  test_pipeline pins both ends of that with the real measured numbers, and
+  test_gui asserts no tier gets reverted on the synthetic.
+- Round tier islands are exported as true DXF `CIRCLE` entities, not polygons
+  (`fit_circle`, `_split_circles`, `circle_tol` on `sketch_model`, "circle fit
+  mm" in step 6, 0 = off). A 3.5 mm screw clearance measured on a 0.2 mm
+  raster only supports ~12 vertices — that is the information limit, so no
+  amount of tolerance tuning makes a polygon rounder. Detection details that
+  matter: sample the boundary at vertices AND EDGE MIDPOINTS (every regular
+  polygon has its vertices exactly on a circle, so a vertex-only test calls a
+  square a circle); take the radius from the AREA so the swap preserves the
+  footprint; and use BOTH an absolute tolerance on the raster's scale (real
+  polygonised discs sit half a pixel off — 0.258 mm at px=0.5, 0.139 mm at
+  px=0.2) and a relative one (`_CIRCLE_REL_TOL`) to stop a small square boss
+  being read as a disc. `min_pts` is 8 because deviation alone cannot separate
+  a hexagon (10.0% of r) from an octagon (5.4%). Detection runs BEFORE the
+  clearance offset so circles grow as `r + c`, exactly, instead of being
+  re-rasterised by `_grow_loops` into a fresh set of facets. A tier and the
+  tier below it both cover a boss, so the same disc is emitted twice — that is
+  correct, and the two agree to 0.02 mm (as polygons they once differed by
+  0.967 mm). NOT field-verified through OpenSCAD/SolveSpace yet, like the rest
+  of the DXF output; the box exists so it can be switched off.
 - The output is CAD, not mesh. `sketch_model()` + `export_cad()`: the tier
   model IS a sketch-and-extrude model, so it exports losslessly as one DXF
   per sketch (base outline, each tier, each extra) + `all_sketches.dxf` (one
@@ -345,8 +378,9 @@ printing for fit prototypes.
 - Possible next features: select/edit individual extras (tiers have this
   now), extras along arbitrary axes, an "extend beyond silhouette" helper
   for where the frame exits the grip, per-extra clearance opt-out, a
-  coverage heat-map overlay in the Tiers step, arcs/splines in the DXF instead of
-  dense polylines (fewer points to drag around in SolveSpace).
+  coverage heat-map overlay in the Tiers step, ARCS in the DXF (full circles
+  are done — fillets and rounded slot ends are the obvious next case, and
+  R12 ARC is as portable as CIRCLE).
 - The user's broader workflow is documented in grip-transplant-workflow.md
   (may be in a parent folder): scan → this tool → registration in MeshMixer →
   boolean (Blender 4.5 Manifold solver or OpenSCAD+Manifold) → wall-thickness

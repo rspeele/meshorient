@@ -274,10 +274,7 @@ for _o, _n in zip(tiers, _ref):
     # still capped at 6%: a finer raster resolving MORE frame would mean the
     # coarse map had missed some, which is the regression this test exists for
     # (fixed pixel kernels once cost 81% -> 61% of the profile).
-    _peri = sum(float(np.linalg.norm(np.roll(np.asarray(p), -1, 0)
-                                     - np.asarray(p), axis=1).sum())
-                for p in _o["polys"])
-    _shed = 1.5 * _peri * (maps.px - _fine.px) / 2
+    _shed = core.raster_bias_bound(_o["polys"], maps.px, _fine.px)
     _d = _n["area_mm2"] - _o["area_mm2"]
     print(f"    {_n['name']:4s} {_n['side']:>5s}: area {_o['area_mm2']:8.1f} -> "
           f"{_n['area_mm2']:8.1f} mm2 ({_d:+6.1f}, may shed {_shed:5.1f}), "
@@ -288,6 +285,30 @@ for _o, _n in zip(tiers, _ref):
 # rectangles, which a finer raster describes with FEWER points, not more.
 # On an organic scan boundary it is the other way round.)
 assert abs(_cov_f - _cov) < 0.05, (_cov, _cov_f)
+
+# The export's drift guard has to use that same allowance. Numbers from the
+# real project that exposed it: a 30 mm-proud rod end, 91.8 mm2 of footprint
+# with 77.5 mm of perimeter, legitimately sheds 14.1% going from 0.5 to
+# 0.2 mm/px. A flat 5% guard reverted it to the coarse outline, which was too
+# crude for fit_circle — so the same rod through the same hole came out round
+# on one side of the frame and faceted on the other.
+# 36.2 x 2.53 has exactly that tier's measured area AND perimeter — the bound
+# scales with perimeter, so a compact stand-in would understate it badly
+_rod = np.array([[0., 0.], [36.2, 0.], [36.2, 2.535], [0., 2.535]])
+_rod_a, _rod_p = core._poly_area(_rod), float(np.linalg.norm(
+    np.roll(_rod, -1, 0) - _rod, axis=1).sum())
+assert abs(_rod_a - 91.8) < 0.5 and abs(_rod_p - 77.5) < 0.5, (_rod_a, _rod_p)
+_bound = core.raster_bias_bound([_rod], 0.5, 0.2)
+print(f"  drift allowance for a {_rod_a:.1f} mm2 / {_rod_p:.1f} mm island, "
+      f"0.5 -> 0.2 mm/px: {_bound:.1f} mm2 ({100 * _bound / _rod_a:.1f}%) "
+      f"vs a flat 5%")
+assert _bound / _rod_a > 0.15, "must cover the 14.1% a real rod end shed"
+# ...but a wholesale collapse must still trip it. When _fill_gaps was sized in
+# pixels a tier fell from 21405 to 12746 mm2 at a finer raster; the bias bound
+# for a footprint that large is a couple of percent, nowhere near 40%.
+_big = np.array([[0., 0.], [200., 0.], [200., 107.], [0., 107.]])
+assert core.raster_bias_bound([_big], 0.5, 0.2) < 0.05 * core._poly_area(_big)
+assert core.raster_bias_bound([_rod], 0.2, 0.5) == 0.0, "finer-only"
 
 # a small round island (a screw-clearance cylinder) must not be flattened to a
 # triangle by the coarse tolerance a long straight edge needs
@@ -423,13 +444,62 @@ extras = [
 
 # ---- CAD: the model as sketches + extrusion depths, which IS the output
 CLEAR = 0.15
+CFIT = 0.3
 model = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
-                          clearance=CLEAR)
+                          clearance=CLEAR, circle_tol=CFIT)
 assert len(model) == 1 + len(tiers) + len(extras)
 print("sketch model:")
 for s in model:
     print(f"  {s['key']:<24} y {s['y_lo']:+7.2f} .. {s['y_hi']:+7.2f}  "
-          f"{len(s['loops'])} loop(s)  {s['label']}")
+          f"{len(s['loops'])} loop(s) {len(s['circles'])} circle(s)  "
+          f"{s['label']}")
+
+# ---- round islands become true CIRCLE entities. A 3-4 mm screw-clearance disc
+# measured on a fine raster only supports about a dozen vertices, so a polygon
+# can never be rounder than that; a CIRCLE is exact, is one object to drag in
+# SolveSpace, and lets OpenSCAD tessellate at $fn. The synthetic's left-side
+# boss is the case: a true circle of r=4 at (25, 15).
+_lb = [s for s in model if s.get("side") == "left" and s["circles"]]
+# TWO of them: the boss stands proud of the tier below, so that tier covers it
+# as well, and both describe the same disc. That is the shared-wall case in its
+# new form — as polygons those two walls once disagreed by 0.967 mm.
+assert len(_lb) == 2, f"expected the boss in its tier and the one below: {_lb}"
+assert all(len(s["circles"]) == 1 for s in _lb)
+_c0, _c1 = (np.asarray(s["circles"][0]) for s in _lb)
+print(f"  stacked circle walls agree to {np.abs(_c0 - _c1).max():.4f} mm")
+assert np.abs(_c0 - _c1).max() < 0.05, (_c0, _c1)
+_cx, _cz, _cr = _lb[-1]["circles"][0]
+print(f"  circle from the scan: centre ({_cx:.2f}, {_cz:.2f}) r {_cr:.3f} "
+      f"(true 25, 15, r 4 + {CLEAR} clearance)")
+assert np.hypot(_cx - 25, _cz - 15) < 0.25, (_cx, _cz)
+# r = true + the raster's conservative half pixel + clearance, and never under
+assert 4.0 + CLEAR <= _cr < 4.0 + CLEAR + 0.6, _cr
+# clearance goes on the radius analytically, not by re-rasterising the disc
+_nom = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+                         clearance=0.0, circle_tol=CFIT)
+_nr = [s for s in _nom if s.get("side") == "left" and s["circles"]][-1]
+assert abs((_cr - _nr["circles"][0][2]) - CLEAR) < 1e-9, "clearance is r + c"
+# the circle must keep the polygon's footprint: that is how its radius is set
+_poly_rb = _island_at(by[("rboss", "left")], 25, 15)
+assert abs(np.pi * _nr["circles"][0][2] ** 2
+           - core._poly_area(_poly_rb)) < 1e-6, "footprint must be preserved"
+# and it is opt-out: circle_tol = 0 leaves everything a polygon
+assert not any(s["circles"] for s in
+               core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+                                 clearance=CLEAR, circle_tol=0.0)
+               if s["kind"] == "tier")
+# the detector must not turn angular features into circles
+assert core.fit_circle(np.array([[0., 0.], [3., 0.], [3., 3.], [0., 3.]])) is None
+_hex = np.stack([1.7 * np.cos(np.linspace(0, 2 * np.pi, 7)[:-1]),
+                 1.7 * np.sin(np.linspace(0, 2 * np.pi, 7)[:-1])], 1)
+assert core.fit_circle(_hex) is None, "a hexagon is not a circle"
+for _t in tiers:
+    for _p in _t["polys"]:
+        # the boss is legitimately round wherever it appears, and it appears in
+        # its own tier AND every tier below it; nothing else here is
+        if np.hypot(*(np.asarray(_p).mean(0) - [25, 15])) > 6:
+            assert core.fit_circle(_p, CFIT) is None, \
+                f"{_t['name']} island wrongly read as a circle"
 
 # every tier extrudes off the same plane, and clearance is grown in
 for s in model:
@@ -458,9 +528,8 @@ def cad_faces_at(model, x, z):
     lo, hi = np.inf, -np.inf
     for s in model:
         inside = any(_Path(l).contains_point((x, z)) for l in s["loops"])
-        if not inside and "circle" in s:
-            cx, cz, r = s["circle"]
-            inside = np.hypot(x - cx, z - cz) <= r
+        inside = inside or any(np.hypot(x - cx, z - cz) <= r
+                               for cx, cz, r in s.get("circles", ()))
         if inside:
             lo, hi = min(lo, s["y_lo"]), max(hi, s["y_hi"])
     return lo, hi
@@ -489,8 +558,13 @@ assert all(os.path.isfile(f) for f in files)
 for s in model:
     path = os.path.join("frame_solid_cad", s["key"] + ".dxf")
     segs, circles = read_dxf_entities(path)
-    assert len(circles) == (1 if "circle" in s else 0), s["key"]
+    assert len(circles) == len(s.get("circles", ())), s["key"]
+    # a circle must survive as a CIRCLE with its exact centre and radius —
+    # that is the entire point of recognising it rather than emitting facets
+    for got, want in zip(circles, s.get("circles", ())):
+        assert np.allclose(got, want, atol=1e-6), (s["key"], got, want)
     if not s["loops"]:
+        assert circles, f"{s['key']} exported nothing at all"
         continue
     loops = read_dxf_polylines(path)
     assert len(loops) == len(s["loops"]), (s["key"], len(loops))
@@ -538,9 +612,8 @@ for sk in model:
     for loop in sk["loops"]:
         ax.add_patch(plt.Polygon(np.asarray(loop), closed=True, fill=False,
                                  ec=c, lw=1.4))
-    if "circle" in sk:
-        ax.add_patch(plt.Circle(sk["circle"][:2], sk["circle"][2], fill=False,
-                                ec=c, lw=1.4))
+    for cx, cz, rr in sk.get("circles", ()):
+        ax.add_patch(plt.Circle((cx, cz), rr, fill=False, ec=c, lw=1.4))
 ax.autoscale_view()
 ax.set_title(f"5. The {len(model)} exported sketches (grey base, blue L, red R)")
 
@@ -553,8 +626,7 @@ def cad_section_x(model, x, ys, zs):
         hit = np.zeros(len(zs), bool)
         for loop in sk["loops"]:
             hit |= _Path(np.asarray(loop)).contains_points(probe)
-        if "circle" in sk:
-            cx, cz, rr = sk["circle"]
+        for cx, cz, rr in sk.get("circles", ()):
             hit |= np.hypot(x - cx, zs - cz) <= rr
         img |= hit[:, None] & ((ys >= sk["y_lo"]) & (ys <= sk["y_hi"]))[None, :]
     return img

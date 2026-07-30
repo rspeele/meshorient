@@ -151,6 +151,19 @@ outlines by hand — which is the point — extrude, union.
 the finished subtraction solid; set it to 0 for nominal geometry. The DXFs
 use only `LINE` and `CIRCLE` entities, which every importer accepts.
 
+`circle fit mm` recognises tier islands that really are circles — grip-screw
+and pin clearances — and writes them as a true `CIRCLE` instead of a polygon.
+A 3.5 mm hole measured on a 0.2 mm raster only supports about a dozen
+vertices, so a polygon can never be rounder than that; the circle is exact,
+arrives in SolveSpace as one object you can dimension rather than twelve
+points, and OpenSCAD tessellates it at `$fn`. The clearance goes on the
+radius arithmetically instead of by re-rasterising the disc, and `build.txt`
+lists every circle's centre and diameter — handy for checking a hole came out
+the size you expected. The number is how far a loop may stray from a circle
+and still count, so about one `export px`; 0 turns the whole thing off and
+everything goes out as polygons. Only tier islands are tested — the base
+outline is left alone, and cylinder extras were always real circles.
+
 `export px` re-measures the scan and re-cuts the tiers at a finer raster than
 step 4 works at — step 4 stays at `map px` (0.5 mm) to keep clicking
 responsive, but the output can afford better. 0.2 mm is a good default: on a

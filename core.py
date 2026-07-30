@@ -536,6 +536,13 @@ def base_faces(base_thickness, base_y0=0.0):
 
 
 _SIMPLIFY_FLOOR = 0.10        # mm; finer than this just traces the raster
+_CIRCLE_REL_TOL = 0.12        # a loop may stray this much of its own radius
+                              # and still be called a circle. This is the
+                              # SHAPE guard, and it is what stops a small
+                              # square boss being read as a disc: a square's
+                              # boundary sits 25% of r_equivalent off its own
+                              # best-fit circle, a rasterised disc 6-8%.
+                              # The other guard is absolute (see fit_circle).
 _SIMPLIFY_AREA_TOL = 0.02     # accept the coarsest tolerance costing this much
                               # footprint. Measured: 0.05 drops a 3.4 mm
                               # screw-clearance circle from 12 points to 8,
@@ -550,6 +557,71 @@ def _poly_area(P):
     """Absolute area of a closed polygon (shoelace)."""
     x, y = np.asarray(P, float).T
     return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))) / 2.0
+
+
+def fit_circle(poly, tol_mm=0.3, min_pts=8, min_r=0.6):
+    """(cx, cz, r) if this loop really is a circle, else None.
+
+    Grip-screw and pin clearances come off the scan as polygonised discs, and
+    a 3.4 mm circle measured on a 0.2 mm raster only supports about a dozen
+    vertices — that is the information limit, not a simplification failure.
+    Recognising the circle lets the DXF carry one CIRCLE entity instead, which
+    is exact, is one draggable object in SolveSpace rather than twelve points,
+    and lets OpenSCAD tessellate it at $fn instead of inheriting our facets.
+    The clearance offset also becomes r + c rather than a rasterised dilation.
+
+    The boundary is sampled at vertices AND edge midpoints, which is the whole
+    trick: every regular polygon has its vertices exactly on a circle, so a
+    vertex-only test calls a square a circle. Midpoints are what separate
+    them — for a regular n-gon they sit a sagitta inside the vertices, so the
+    residual against the best-fit circle scales as 1/n^2.
+
+    The radius comes from the AREA, not from the fit, so swapping the polygon
+    for the circle preserves the footprint exactly — the same rule
+    simplification follows everywhere else here.
+
+    Both guards are needed. `tol_mm` is ABSOLUTE and belongs on the raster's
+    scale — about one map pixel, because a loop that hugs a circle to within a
+    pixel IS a circle as far as the measurement can say. Measured deviations
+    of real polygonised discs are half a pixel: 0.258 mm at px=0.5, 0.139 mm
+    at px=0.2. `_CIRCLE_REL_TOL` is the shape guard; without it a coarse
+    tol_mm would swallow a small square boss whole.
+
+    `min_pts` is 8 because the deviation test alone cannot separate a regular
+    HEXAGON (10.0% of r) from an octagon (5.4%) by any margin worth trusting,
+    and a hex recess is a plausible thing to meet on a frame. Every
+    polygonised disc measured here clears 8 comfortably — 12-13 points on the
+    real scan, 16-18 on the synthetic.
+    """
+    P = np.asarray(poly, float)
+    if len(P) < min_pts:
+        return None
+    area = _poly_area(P)
+    r = float(np.sqrt(area / np.pi)) if area > 0 else 0.0
+    if r < min_r:
+        return None
+    S = np.vstack([P, (P + np.roll(P, -1, axis=0)) / 2.0])
+    # algebraic (Kasa) least squares: x^2+y^2 = D*x + E*y + F, centre at D/2,E/2
+    try:
+        sol = np.linalg.lstsq(np.column_stack([S[:, 0], S[:, 1],
+                                               np.ones(len(S))]),
+                              (S ** 2).sum(1), rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return None
+    cx, cz = float(sol[0]) / 2.0, float(sol[1]) / 2.0
+    dev = np.abs(np.linalg.norm(S - [cx, cz], axis=1) - r).max()
+    if dev > tol_mm or dev > _CIRCLE_REL_TOL * r:
+        return None
+    return cx, cz, r
+
+
+def _split_circles(polys, tol_mm):
+    """Partition loops into (polygons, circles) — circles as (cx, cz, r)."""
+    loops, circles = [], []
+    for p in polys:
+        fit = fit_circle(p, tol_mm) if tol_mm > 0 else None
+        (circles if fit else loops).append(fit if fit else p)
+    return loops, circles
 
 
 def _pin_corners(P, refs, tol):
@@ -923,6 +995,30 @@ def _raster_polys_map(polys, maps: ThicknessMaps):
     return img > 0
 
 
+def raster_bias_bound(polys, px_coarse, px_fine, safety=1.5):
+    """How much footprint a FINER raster may legitimately shed, in mm².
+
+    measure_maps rasterises conservatively, so every outline carries about half
+    a pixel of outward bias — worth perimeter * px / 2 of area. Re-measuring
+    more finely sheds the difference, and that is the whole point: it is the
+    measurement getting better, not the model changing.
+
+    It has to be a bound and not a percentage because the bias scales with
+    PERIMETER while the guard compares AREA, so it is proportionally huge for a
+    small island with a long boundary. A 30 mm-proud rod end (92 mm², 78 mm of
+    perimeter) legitimately shrinks 14% going from 0.5 to 0.2 mm/px, which a
+    flat 5% guard reverted to the coarse outline — and the coarse outline was
+    too crude for fit_circle to recognise, so the same rod came out round on
+    one side of the frame and faceted on the other (user-reported, via
+    OpenSCAD). `safety` covers the coarse outline's simplified perimeter
+    underestimating the true one.
+    """
+    peri = sum(float(np.linalg.norm(np.roll(np.asarray(p, float), -1, axis=0)
+                                    - np.asarray(p, float), axis=1).sum())
+               for p in polys)
+    return safety * peri * max(0.0, float(px_coarse) - float(px_fine)) / 2.0
+
+
 def coverage_report(maps: ThicknessMaps, regions, base_thickness, base_y0=0.0,
                     tol_mm=0.25):
     """How much of the real frame the tier model still leaves under-thick.
@@ -1044,14 +1140,20 @@ def _box_loop(e, pad=0.0):
 
 
 def sketch_model(sil: Silhouette, base_thickness, regions, extras,
-                 base_y0=0.0, clearance=0.0):
+                 base_y0=0.0, clearance=0.0, circle_tol=0.0):
     """The solid as a list of sketches with extrusion ranges.
 
-    Each entry: {"key", "kind", "label", "loops" (world XZ), "y_lo", "y_hi"}.
-    Every tier extrudes from the same plane - y = base_y0 - so in CAD they
-    all share one workplane and differ only in depth. The base straddles it.
-    `clearance` (mm per side) is grown into the outlines and the depths, so
-    what comes out is the finished subtraction solid.
+    Each entry: {"key", "kind", "label", "loops" (world XZ),
+    "circles" [(cx, cz, r)], "y_lo", "y_hi"}. Every tier extrudes from the
+    same plane - y = base_y0 - so in CAD they all share one workplane and
+    differ only in depth. The base straddles it. `clearance` (mm per side) is
+    grown into the outlines and the depths, so what comes out is the finished
+    subtraction solid.
+
+    `circle_tol` > 0 turns tier islands that really are circles into CIRCLE
+    entities (see fit_circle). It runs BEFORE the clearance offset, so those
+    grow as r + clearance — exact, where _grow_loops would re-rasterise the
+    disc and hand back a fresh set of facets.
     """
     c = float(clearance)
     T = float(base_thickness)
@@ -1059,7 +1161,7 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
     model = [{"key": "00_base", "kind": "base",
               "label": f"base tier - whole silhouette, {T:.2f} mm thick",
               "loops": _grow_loops([np.asarray(sil.polygon, float)], c),
-              "y_lo": yL_b - c, "y_hi": yR_b + c}]
+              "circles": [], "y_lo": yL_b - c, "y_hi": yR_b + c}]
 
     n = {"left": 0, "right": 0}
     for t in sort_tiers(regions):
@@ -1070,7 +1172,8 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
                 [t["x1"], t["z1"]], [t["x0"], t["z1"]]], float)], c)
             model.append({"key": f"rect{len(model):02d}", "kind": "rect",
                           "label": f"legacy rectangle, {w:.2f} mm thick",
-                          "loops": loops, "y_lo": base_y0 - w / 2 - c,
+                          "loops": loops, "circles": [],
+                          "y_lo": base_y0 - w / 2 - c,
                           "y_hi": base_y0 + w / 2 + c})
             continue
         if not t.get("polys"):
@@ -1078,7 +1181,10 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
         side = t["side"]
         n[side] += 1
         fo = tier_offset(t, T, base_y0)
-        loops = _grow_loops([np.asarray(p, float) for p in t["polys"]], c)
+        polys, circles = _split_circles([np.asarray(p, float)
+                                         for p in t["polys"]], circle_tol)
+        loops = _grow_loops(polys, c) if polys else []
+        circles = [(cx, cz, r + c) for cx, cz, r in circles]
         if side == "right":
             y_lo, y_hi = base_y0, fo + c
         else:
@@ -1089,7 +1195,8 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
             "kind": "tier", "side": side,
             "label": (f"{side} tier {n[side]} - {t['add_mm']:+.2f} mm proud "
                       f"of base, face at y={fo if side == 'right' else -fo:+.2f}"),
-            "loops": loops, "y_lo": y_lo, "y_hi": y_hi})
+            "loops": loops, "circles": circles,
+            "y_lo": y_lo, "y_hi": y_hi})
 
     for i, e in enumerate(extras, 1):
         yc = e.get("yc", 0.0)
@@ -1098,23 +1205,22 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
             model.append({"key": f"X{i}_box", "kind": "extra",
                           "label": f"extra {i} - box, tilt "
                                    f"{e.get('tilt_deg', 0.0):g} deg",
-                          "loops": [_box_loop(e, c)],
+                          "loops": [_box_loop(e, c)], "circles": [],
                           "y_lo": yc - hw, "y_hi": yc + hw})
         elif e["kind"] == "cyl_y":
             hw = e["ylen"] / 2 + c
             model.append({"key": f"X{i}_cyl", "kind": "extra",
                           "label": f"extra {i} - cylinder dia {e['dia']:g} mm",
-                          "circle": (e["x"], e["z"], e["dia"] / 2 + c),
+                          "circles": [(e["x"], e["z"],
+                                       e["dia"] / 2 + c)],
                           "loops": [], "y_lo": yc - hw, "y_hi": yc + hw})
     return model
 
 
 def _sketch_entities(s, layer=None):
-    ents = [dxf_polyline(loop, True, layer or s["key"]) for loop in s["loops"]]
-    if "circle" in s:
-        x, z, r = s["circle"]
-        ents.append(dxf_circle(x, z, r, layer or s["key"]))
-    return ents
+    lay = layer or s["key"]
+    return ([dxf_polyline(loop, True, lay) for loop in s["loops"]]
+            + [dxf_circle(x, z, r, lay) for x, z, r in s.get("circles", ())])
 
 
 def export_cad(folder, model, meta=None):
@@ -1156,7 +1262,19 @@ def export_cad(folder, model, meta=None):
           "are rings of line segments: OpenSCAD refuses POLYLINE and would",
           "need an R13+ file for LWPOLYLINE, and SolveSpace splits polylines",
           "into segments on import anyway.",
-          "",
+          ""]
+    n_circ = sum(len(s.get("circles", ())) for s in model)
+    if n_circ:
+        L += [f"{n_circ} round island(s) are true CIRCLE entities, not",
+              "polygons - grip-screw and pin clearances, recognised from the",
+              "scan. They carry an exact centre and radius (clearance already",
+              "added to the radius), so SolveSpace gives you one circle to",
+              "drag and dimension, and OpenSCAD tessellates them at $fn",
+              "instead of inheriting the raster's facets. Listed under",
+              "'circles' below. Set 'circle fit mm' to 0 to export them as",
+              "polygons like everything else.",
+              ""]
+    L += [
           "Units are mm. The sketches lie in the frame's XZ plane:",
           "    DXF x = frame X (along the bore)",
           "    DXF y = frame Z (vertical)",
@@ -1172,6 +1290,14 @@ def export_cad(folder, model, meta=None):
         L.append(f"{s['key'] + '.dxf':<26} {s['y_lo']:>+9.3f} "
                  f"{s['y_hi']:>+9.3f} {s['y_hi'] - s['y_lo']:>8.3f}  "
                  f"{s['label']}")
+    if n_circ:
+        L += ["", f"circles ({n_circ}) - centre and radius as exported, "
+                  f"clearance included", "-" * 100]
+        for s in model:
+            for cx, cz, r in s.get("circles", ()):
+                L.append(f"{s['key'] + '.dxf':<26} centre "
+                         f"({cx:+9.3f}, {cz:+9.3f})  r {r:7.3f}  "
+                         f"dia {2 * r:7.3f}")
     L += ["", "SolveSpace:",
           "  1. New sketch in a workplane on the XZ plane (Y = 0 normal).",
           "  2. File > Import... the .dxf you want (or all_sketches.dxf for",

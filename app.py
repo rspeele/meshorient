@@ -524,6 +524,10 @@ class App:
         r = slot(split=(0.78, 0.10))
         self.tb_epx = TextBox(self.fig.add_axes(r), "export px ", initial="0.2")
         self.w5.append(self.tb_epx)
+        r = slot(split=(0.78, 0.10))
+        self.tb_cfit = TextBox(self.fig.add_axes(r), "circle fit mm ",
+                               initial="0.3")
+        self.w5.append(self.tb_cfit)
         r = slot()
         self.tb_out = TextBox(self.fig.add_axes(r), "name ",
                               initial="frame_solid")
@@ -1255,10 +1259,14 @@ class App:
             clr = float(self.tb_clr.text)
         except ValueError:
             clr = 0.0
+        try:
+            cfit = max(0.0, float(self.tb_cfit.text))
+        except ValueError:
+            cfit = 0.0
         model = core.sketch_model(
             self.sil, self.base_thickness,
             self.regions if regions is None else regions, self.extras,
-            base_y0=self.base_y0, clearance=clr)
+            base_y0=self.base_y0, clearance=clr, circle_tol=cfit)
         self.model = model
         return model
 
@@ -1283,22 +1291,28 @@ class App:
         # Refining must not change WHAT is included, only where its edges
         # land. If a tier's footprint moves by more than a few percent the
         # finer measurement disagrees with what was reviewed, so keep the
-        # coarse outline for that tier and say so.
+        # coarse outline for that tier and say so. The allowance is 5% OR the
+        # conservative-raster bias the finer measurement is supposed to shed,
+        # whichever is larger — see core.raster_bias_bound, because a flat
+        # percentage punishes small high-perimeter islands for getting
+        # measured better.
         drifted = []
         for old, new in zip(self.regions, regions):
             if core.region_kind(new) != "tier":
                 continue
             a0 = old.get("area_mm2") or 0.0
             a1 = new.get("area_mm2") or 0.0
-            if a0 > 0 and abs(a1 - a0) > 0.05 * a0:
+            allow = max(0.05 * a0, core.raster_bias_bound(
+                old.get("polys") or [], self.maps.px, epx))
+            if a0 > 0 and abs(a1 - a0) > allow:
                 new["polys"] = old.get("polys", [])
                 new["area_mm2"] = a0
                 drifted.append(f"{new['side']} +{new['add_mm']:g}")
         note = f" Re-cut at {epx:g} mm/px."
         if drifted:
-            note += (f" {len(drifted)} tier(s) ({', '.join(drifted)}) moved by "
-                     f"more than 5% at that resolution and kept their "
-                     f"step-4 outlines — try a coarser export px.")
+            note += (f" {len(drifted)} tier(s) ({', '.join(drifted)}) changed "
+                     f"footprint by more than the raster can account for and "
+                     f"kept their step-4 outlines — try a coarser export px.")
         return regions, note
 
     def _on_export_cad(self, _):
@@ -1327,11 +1341,14 @@ class App:
             self._status(f"CAD export failed: {e}")
             return
         pts = sum(len(l) for s in model for l in s["loops"])
+        circles = sum(len(s.get("circles", ())) for s in model)
+        cnote = (f" {circles} round island(s) went out as true DXF circles."
+                 if circles else "")
         self._status(f"Exported {len(model)} sketches ({pts} outline points) to "
                      f"{folder}\\ ({len(files)} files): one DXF each plus "
                      f"all_sketches.dxf, build.txt (the extrusion table) and "
-                     f"assembly.scad.{note} Clearance {clr:g} mm is baked in — "
-                     f"set it to 0 for nominal outlines.")
+                     f"assembly.scad.{note}{cnote} Clearance {clr:g} mm is "
+                     f"baked in — set it to 0 for nominal outlines.")
         self._draw()
 
     # ================================================== project I/O
@@ -1346,6 +1363,8 @@ class App:
              "map_px": self.tb_mpx.text,
              "regions": self.regions, "extras": self.extras,
              "export": {"clearance": self.tb_clr.text,
+                        "export_px": self.tb_epx.text,
+                        "circle_fit": self.tb_cfit.text,
                         "out": self.tb_out.text}}
         path = self.tb_proj.text.strip() or "project.json"
         with open(path, "w") as fh:
@@ -1364,6 +1383,8 @@ class App:
         self.tb_simp.set_val(d["sil"]["simplify"])
         exp = d.get("export", d.get("build", {}))     # "build" is the old key
         self.tb_clr.set_val(str(exp.get("clearance", "0.15")))
+        self.tb_epx.set_val(str(exp.get("export_px", "0.2")))
+        self.tb_cfit.set_val(str(exp.get("circle_fit", "0.3")))
         self.tb_out.set_val(str(exp.get("out", "frame_solid")))
         self.tb_mpx.set_val(str(d.get("map_px", "0.5")))
         # base_width is the pre-two-sided key name
@@ -1516,8 +1537,7 @@ class App:
                         p = np.asarray(loop, float)
                         ax.add_patch(MplPolygon(p, closed=True, fill=False,
                                                 ec=c, lw=1.6, alpha=0.9))
-                    if "circle" in s:
-                        cx, cz, rr = s["circle"]
+                    for cx, cz, rr in s.get("circles", ()):
                         ax.add_patch(MplCircle((cx, cz), rr, fill=False,
                                                ec=c, lw=1.6))
                     # the outlines nest, so label them in a column rather
