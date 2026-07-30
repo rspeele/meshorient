@@ -60,6 +60,28 @@ print(f"loaded: {len(verts)} verts, {len(faces)} tris")
 R = core.auto_orient(verts)
 verts_o = verts  # synthetic is already in datum pose (Y=0 mid-plane)
 
+# ---- the silhouette must be the UNION of the projected triangles.
+# cv2.fillPoly applies even-odd across contours passed in one call, so a
+# closed surface (front triangle + back triangle over the same pixel) used to
+# cancel itself out. A plain cube is the minimal case: 12 triangles, and the
+# whole projection is covered exactly twice.
+_cube_v = np.array([[0, 0, 0], [20, 0, 0], [20, 10, 0], [0, 10, 0],
+                    [0, 0, 30], [20, 0, 30], [20, 10, 30], [0, 10, 30]], float)
+_cube_f = np.array([[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6],
+                    [0, 4, 5], [0, 5, 1], [1, 5, 6], [1, 6, 2],
+                    [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0]], np.int64)
+_sil = core.extract_silhouette(_cube_v, _cube_f, px=0.15, close_mm=0.5,
+                               min_area_mm2=1.0)
+_p = np.asarray(_sil.polygon)
+_area = abs(float(np.dot(_p[:, 0], np.roll(_p[:, 1], -1))
+                  - np.dot(_p[:, 1], np.roll(_p[:, 0], -1)))) / 2.0
+print(f"cube silhouette: {_area:.1f} mm2 (expect 20x30 = 600), "
+      f"{len(_p)} pts, bbox x[{_p[:,0].min():.2f},{_p[:,0].max():.2f}] "
+      f"z[{_p[:,1].min():.2f},{_p[:,1].max():.2f}]")
+assert abs(_area - 600) / 600 < 0.05, "silhouette must be the union, not parity"
+assert _p[:, 0].min() > -0.5 and _p[:, 0].max() < 20.5
+assert _p[:, 1].min() > -0.5 and _p[:, 1].max() < 30.5
+
 # ---- levelling: a plane fit through picked points squares the scan up
 flat = np.array([[-30.0, 11.0, 20.0], [30.0, 11.0, 20.0],
                  [-30.0, 11.0, -50.0], [30.0, 11.0, -50.0]])

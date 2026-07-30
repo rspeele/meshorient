@@ -143,6 +143,25 @@ class Silhouette:
                 self.z0 - self.px / 2, self.z0 + (h - 0.5) * self.px)
 
 
+def _fill_union(img, polys, value=255, convex=False):
+    """Fill the UNION of `polys` — one cv2 call each, deliberately.
+
+    cv2.fillPoly applies the even-odd rule ACROSS every contour handed to it
+    in a single call, so overlapping polygons cancel instead of merging. Given
+    a whole mesh's triangles at once that erases every pixel covered an even
+    number of times — which is most of them, since a closed surface projects
+    front-face-plus-back-face onto the same pixel. A plain cube came out with
+    nothing but its diagonals, and on a real scan the silhouette lost whole
+    limbs. Do not "optimise" this back into one call.
+    """
+    fill = cv2.fillConvexPoly if convex else None
+    for p in polys:
+        if fill is not None:
+            fill(img, p, value)
+        else:
+            cv2.fillPoly(img, [p], value)
+
+
 def extract_silhouette(verts, faces, px=0.15, close_mm=1.5,
                        simplify_mm=0.3, min_area_mm2=25.0) -> Silhouette:
     """Project mesh to the XZ plane, keep only the outer contour.
@@ -163,7 +182,7 @@ def extract_silhouette(verts, faces, px=0.15, close_mm=1.5,
         pts = np.empty((len(faces), 3, 2), np.float64)
         pts[:, :, 0] = (tv[:, :, 0] - x0) / px                 # col = X
         pts[:, :, 1] = (tv[:, :, 2] - z0) / px                 # row = Z
-        cv2.fillPoly(img, np.round(pts).astype(np.int32), 255)
+        _fill_union(img, np.round(pts).astype(np.int32), convex=True)
     else:  # point cloud fallback
         ci = np.clip(np.round((x - x0) / px).astype(int), 0, w - 1)
         ri = np.clip(np.round((z - z0) / px).astype(int), 0, h - 1)
@@ -415,7 +434,7 @@ def _clip_to_silhouette(polys, sil: Silhouette, simplify_mm=0.2,
         q[:, 0] = (p[:, 0] - sil.x0) / sil.px        # col = x
         q[:, 1] = (p[:, 1] - sil.z0) / sil.px        # row = z
         conts.append(np.round(q).astype(np.int32))
-    cv2.fillPoly(img, conts, 255)
+    _fill_union(img, conts)
     img = cv2.bitwise_and(img, sil.mask)
 
     cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -602,8 +621,7 @@ def _raster_polys_map(polys, maps: ThicknessMaps):
         q[:, 0] = (p[:, 0] - maps.x0) / maps.px      # col = x
         q[:, 1] = (p[:, 1] - maps.z0) / maps.px      # row = z
         conts.append(np.round(q).astype(np.int32))
-    if conts:
-        cv2.fillPoly(img, conts, 255)
+    _fill_union(img, conts)
     return img > 0
 
 
@@ -693,9 +711,9 @@ def _grow_loops(loops, mm, simplify_mm=0.1):
     w = int(np.ceil((x1 - x0) / px)) + 1
     h = int(np.ceil((z1 - z0) / px)) + 1
     img = np.zeros((h, w), np.uint8)
-    cv2.fillPoly(img, [np.round(np.stack([(l[:, 0] - x0) / px,
-                                          (l[:, 1] - z0) / px], 1)
-                                ).astype(np.int32) for l in loops], 255)
+    _fill_union(img, [np.round(np.stack([(l[:, 0] - x0) / px,
+                                         (l[:, 1] - z0) / px], 1)
+                               ).astype(np.int32) for l in loops])
     k = max(3, int(round(2 * mm / px)) | 1)
     img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
     cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

@@ -828,9 +828,10 @@ class App:
             px = float(self.tb_px.text)
             cl = float(self.tb_close.text)
             sp = float(self.tb_simp.text)
-            self.sil = core.extract_silhouette(self.verts, self.orig_faces,
-                                               px=px, close_mm=cl,
-                                               simplify_mm=sp)
+            with self._busy("extracting silhouette…"):
+                self.sil = core.extract_silhouette(self.verts, self.orig_faces,
+                                                   px=px, close_mm=cl,
+                                                   simplify_mm=sp)
         except Exception as e:
             self._status(f"Silhouette failed: {e}")
             return

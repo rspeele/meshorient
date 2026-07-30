@@ -47,6 +47,17 @@ printing for fit prototypes.
   extrude the sketches, do not re-raster the model.
 - The silhouette (cv2 RETR_EXTERNAL) auto-fills magwell windows/pin holes —
   this is a core feature, keep it.
+- NEVER hand more than one contour to a single `cv2.fillPoly` call. It
+  applies the EVEN-ODD rule across them, so overlapping polygons cancel
+  instead of merging. `extract_silhouette` used to pass the whole triangle
+  array in one call, which erased every pixel covered an even number of
+  times — i.e. most of them, since a closed surface projects a front and a
+  back triangle onto the same pixel. A plain cube raised "Silhouette too
+  small"; on a real 760k-tri scan the outline silently lost 21 mm in X and
+  50 mm in Z (user-reported: geometry they had added in Blender vanished).
+  Fill one polygon per call via `core._fill_union`, which is also FASTER
+  than the broken single call (0.86 s vs 1.07 s on that scan, because it
+  fills far less area twice). test_pipeline's cube case guards this.
 - The solid is TWO-SIDED: bounded by two independent face surfaces
   yL(x,z) <= y <= yR(x,z), built from a stack of THICKNESS TIERS per side
   (see below). Not symmetric about Y=0. Extras (tilted boxes for the
