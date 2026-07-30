@@ -521,6 +521,9 @@ class App:
         self.tb_clr = TextBox(self.fig.add_axes(r), "clearance mm ",
                               initial="0.15")
         self.w5.append(self.tb_clr)
+        r = slot(split=(0.78, 0.10))
+        self.tb_epx = TextBox(self.fig.add_axes(r), "export px ", initial="0.2")
+        self.w5.append(self.tb_epx)
         r = slot()
         self.tb_out = TextBox(self.fig.add_axes(r), "name ",
                               initial="frame_solid")
@@ -1242,18 +1245,61 @@ class App:
             self.add_extra_cyl(x, z)
 
     # ================================================== step 6: export
-    def _sketch_model(self):
+    def _sketch_model(self, regions=None):
         """The model as sketches + extrusion depths (cached for the preview)."""
-        if self.model is None and self.sil is not None \
-                and self.base_thickness is not None:
-            try:
-                clr = float(self.tb_clr.text)
-            except ValueError:
-                clr = 0.0
-            self.model = core.sketch_model(
-                self.sil, self.base_thickness, self.regions, self.extras,
-                base_y0=self.base_y0, clearance=clr)
-        return self.model
+        if regions is None and self.model is not None:
+            return self.model
+        if self.sil is None or self.base_thickness is None:
+            return None
+        try:
+            clr = float(self.tb_clr.text)
+        except ValueError:
+            clr = 0.0
+        model = core.sketch_model(
+            self.sil, self.base_thickness,
+            self.regions if regions is None else regions, self.extras,
+            base_y0=self.base_y0, clearance=clr)
+        self.model = model
+        return model
+
+    def _refined_regions(self):
+        """Re-cut the tiers on a finer raster than step 4 works at.
+
+        Step 4 has to stay responsive, so it measures at `map px` (0.5 mm by
+        default) — plenty to pick tiers on, but it quantises every tier
+        boundary to that grid. The export can afford better: re-measure, re-cut
+        COPIES of the tiers, and leave the interactive state alone. Returns
+        (regions, note).
+        """
+        try:
+            epx = float(self.tb_epx.text)
+        except ValueError:
+            return self.regions, ""
+        if self.maps is None or epx <= 0 or epx >= self.maps.px:
+            return self.regions, ""
+        fine = core.measure_maps(self.verts, self.orig_faces, self.sil, px=epx)
+        regions = [dict(r) for r in self.regions]     # segment_tier replaces
+        core.segment_all(fine, regions, self.base_thickness, self.base_y0)
+        # Refining must not change WHAT is included, only where its edges
+        # land. If a tier's footprint moves by more than a few percent the
+        # finer measurement disagrees with what was reviewed, so keep the
+        # coarse outline for that tier and say so.
+        drifted = []
+        for old, new in zip(self.regions, regions):
+            if core.region_kind(new) != "tier":
+                continue
+            a0 = old.get("area_mm2") or 0.0
+            a1 = new.get("area_mm2") or 0.0
+            if a0 > 0 and abs(a1 - a0) > 0.05 * a0:
+                new["polys"] = old.get("polys", [])
+                new["area_mm2"] = a0
+                drifted.append(f"{new['side']} +{new['add_mm']:g}")
+        note = f" Re-cut at {epx:g} mm/px."
+        if drifted:
+            note += (f" {len(drifted)} tier(s) ({', '.join(drifted)}) moved by "
+                     f"more than 5% at that resolution and kept their "
+                     f"step-4 outlines — try a coarser export px.")
+        return regions, note
 
     def _on_export_cad(self, _):
         if self.sil is None:
@@ -1270,19 +1316,21 @@ class App:
         folder = os.path.splitext(self.tb_out.text.strip()
                                   or "frame_solid")[0] + "_cad"
         try:
-            with self._busy("exporting sketches…"):
+            with self._busy("re-cutting tiers, exporting…"):
                 self.model = None            # clearance may have changed
-                model = self._sketch_model()
+                regions, note = self._refined_regions()
+                model = self._sketch_model(regions)
                 files = core.export_cad(folder, model, meta={
                     "scan": self.scan_path, "clearance": clr,
                     "base_y0": self.base_y0})
         except Exception as e:
             self._status(f"CAD export failed: {e}")
             return
-        self._status(f"Exported {len(model)} sketches to {folder}\\ "
-                     f"({len(files)} files): one DXF each plus "
+        pts = sum(len(l) for s in model for l in s["loops"])
+        self._status(f"Exported {len(model)} sketches ({pts} outline points) to "
+                     f"{folder}\\ ({len(files)} files): one DXF each plus "
                      f"all_sketches.dxf, build.txt (the extrusion table) and "
-                     f"assembly.scad. Clearance {clr:g} mm is baked in — "
+                     f"assembly.scad.{note} Clearance {clr:g} mm is baked in — "
                      f"set it to 0 for nominal outlines.")
         self._draw()
 

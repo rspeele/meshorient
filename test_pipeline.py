@@ -1,6 +1,7 @@
 """Headless end-to-end test of the frame2solid core pipeline."""
 import os
 
+import cv2
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -82,6 +83,60 @@ assert abs(_area - 600) / 600 < 0.05, "silhouette must be the union, not parity"
 assert _p[:, 0].min() > -0.5 and _p[:, 0].max() < 20.5
 assert _p[:, 1].min() > -0.5 and _p[:, 1].max() < 30.5
 
+# ---- a tier boundary is measured on the coarse thickness map, so a straight
+# feature edge arrives as a staircase. It must come back out straight: the
+# simplify tolerance is tied to the MAP pixel, and the snap-to-profile runs
+# first so protecting the profile no longer forces a fine tolerance. (Seen in
+# OpenSCAD: the top edge of a plain rectangular block came out visibly jagged.)
+_m = np.zeros((470, 470), np.uint8)
+cv2.rectangle(_m, (33, 33), (436, 436), 255, -1)          # 5..65 mm at 0.15
+_sil2 = core.Silhouette(_m, 0.0, 0.0, 0.15,
+                        np.array([[5., 5.], [65., 5.], [65., 65.], [5., 65.]]))
+_xs = np.arange(10.0, 60.01, 0.5)                          # 0.5 mm map pixels
+_zs = np.round((15 + (_xs - 10) * 23 / 50) / 0.5) * 0.5    # ~25 deg staircase
+_stair = []
+for _i in range(len(_xs) - 1):
+    _stair += [[_xs[_i], _zs[_i]], [_xs[_i + 1], _zs[_i]]]
+_stair = np.asarray(_stair)
+_clipped = core._clip_to_silhouette(
+    [np.vstack([_stair, [[60., 58.], [10., 58.]]])], _sil2, simplify_mm=1.0)
+_q = max(_clipped, key=len)
+_edge = _q[(_q[:, 1] < 55) & (_q[:, 0] > 9) & (_q[:, 0] < 61)]
+_c = _edge.mean(0)
+_n = np.linalg.svd(_edge - _c)[2][1]
+_wander = np.abs((_edge - _c) @ _n).max()
+print(f"staircased edge: {len(_stair)} pts in -> {len(_edge)} out, "
+      f"wander {_wander:.3f} mm (input steps were 0.5 mm)")
+assert len(_edge) <= 6, f"{len(_edge)} points left on a straight edge"
+assert _wander < 0.4, _wander
+
+# ---- measure_maps rasterises the triangles; that has to be EXACT.
+# It replaced scattering random points over each triangle, which left 26% of
+# in-outline pixels empty at 0.5 mm/px and 52% at 0.1 — the finer the raster
+# the emptier — and the grey-close that patched those holes is what put a
+# staircase on every diagonal tier boundary. One big diagonal triangle of
+# known area is the whole invariant: coverage converges on the true area from
+# ABOVE (rasterising is conservative, so the excess is perimeter x px/2) and
+# it must converge, not wander. A window sized from each bucket's lower bound
+# instead of its largest member silently truncated triangles bigger than a
+# pixel or two, which cost 8 mm off the end of a 39 mm feature.
+_tri_v = np.array([[0., 5., 0.], [40., 5., 0.], [0., 5., 30.]])
+_tri_f = np.array([[0, 1, 2]])
+_prev_err = 1e9
+for _px in (1.0, 0.5, 0.25, 0.1):
+    _, _hi = core._raster_minmax(_tri_v, _tri_f, _px, -1.0, -1.0,
+                                 int(42 / _px), int(32 / _px))
+    _cov = (_hi > -1e8)
+    _area, _err = _cov.sum() * _px ** 2, 0.0
+    _err = _area - 600.0
+    _peri = (40 + 30 + 50) * _px / 2
+    print(f"  raster of a 600 mm2 diagonal triangle at {_px} mm/px: "
+          f"{_area:7.1f} mm2 ({_err:+5.1f}, conservative bound {_peri:+.1f})")
+    assert 0 <= _err <= 1.3 * _peri, "coverage must be exact to the half pixel"
+    assert _err < _prev_err, "a finer raster must not be less accurate"
+    _prev_err = _err
+    assert np.allclose(_hi[_cov], 5.0), "interpolated Y must be the plane's"
+
 # ---- levelling: a plane fit through picked points squares the scan up
 flat = np.array([[-30.0, 11.0, 20.0], [30.0, 11.0, 20.0],
                  [-30.0, 11.0, -50.0], [30.0, 11.0, -50.0]])
@@ -108,7 +163,6 @@ sil = core.extract_silhouette(verts_o, faces, px=0.15, close_mm=1.5)
 print(f"silhouette: mask {sil.mask.shape}, polygon {len(sil.polygon)} pts")
 
 # verify the magwell window was filled: the filled mask must have no holes
-import cv2
 cnts, hier = cv2.findContours(sil.mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 inner = sum(1 for h in hier[0] if h[3] != -1) if hier is not None else 0
 print(f"interior holes in silhouette: {inner}  (expect 0)")
@@ -121,7 +175,7 @@ maps = core.measure_maps(verts_o, faces, sil, px=0.5)
 
 # the boss is right-side only: the two faces must disagree there
 s_boss = core.sample_maps(maps, 5, 4)
-s_grip = core.sample_maps(maps, 25, -30)
+s_grip = core.sample_maps(maps, 30, 20)
 print(f"faces at the boss: L={-s_boss['hL']:+.2f} R={s_boss['hR']:+.2f} "
       f"(expect -11 / +14);  plain grip wall: L={-s_grip['hL']:+.2f} "
       f"R={s_grip['hR']:+.2f} (expect -11 / +11)")
@@ -138,11 +192,13 @@ assert abs(base - 12) < 0.5 and abs(base_y0) < 0.3
 
 # ---- tiers: each click ropes in everything proud of the tier below it
 tiers = []
-for side, (x, z), name in [("right", (25, -30), "grip"),
-                           ("left", (25, -30), "grip"),
+for side, (x, z), name in [("right", (30, 20), "grip"),
+                           ("left", (30, 20), "grip"),
+                           ("right", (24, -35), "rib"),    # diagonal strip
                            ("right", (0, 40), "rail"),
                            ("left", (0, 40), "rail"),
-                           ("right", (5, 4), "boss")]:
+                           ("right", (5, 4), "boss"),
+                           ("left", (25, 15), "rboss")]:   # round island
     t = core.make_tier(maps, x, z, side, base, base_y0, tiers=tiers)
     t["name"] = name
     tiers.append(t)
@@ -166,6 +222,83 @@ assert (by[("grip", "right")]["area_mm2"] > by[("rail", "right")]["area_mm2"]
 # ... and the boss tier catches the boss only, the rail tier rail+boss
 assert abs(by[("boss", "right")]["area_mm2"] - 45 * 8) / (45 * 8) < 0.30
 assert len(by[("rail", "right")]["polys"]) == 2, "rail tier = rail + boss"
+
+# A tall feature is built as several stacked extrusions — every tier below it
+# also covers it. Where those tiers share a wall they must share it EXACTLY,
+# or the steps between them show up as terracing on what should be one flat
+# face (user-reported, seen in OpenSCAD).
+def _gaps(P, refs):
+    A = np.vstack([np.asarray(r) for r in refs])
+    B = np.vstack([np.roll(np.asarray(r), -1, 0) for r in refs])
+    d = B - A
+    L2 = np.einsum("ij,ij->i", d, d)
+    L2 = np.where(L2 > 0, L2, 1.0)
+    tt = np.clip((P @ d.T - np.einsum("mj,mj->m", A, d)) / L2, 0, 1)
+    o = P[:, None, :] - (A[None] + tt[:, :, None] * d[None])
+    return np.sqrt(np.einsum("nmj,nmj->nm", o, o).min(1))
+
+
+for _side in ("left", "right"):
+    _stack = [t for t in tiers if t["side"] == _side]
+    for _lo, _up in zip(_stack, _stack[1:]):
+        _p = np.vstack([np.asarray(p) for p in _up["polys"]])
+        _g = _gaps(_p, [np.asarray(p) for p in _lo["polys"]])
+        _shared = _g[_g < 1.25]                      # the snap tolerance
+        print(f"  {_side} +{_lo['add_mm']:.2f} -> +{_up['add_mm']:.2f}: "
+              f"{len(_shared)}/{len(_p)} vertices on the lower outline, "
+              f"worst offset {(_shared.max() if len(_shared) else 0):.4f} mm")
+        assert not len(_shared) or _shared.max() < 0.05, \
+            "stacked tiers must share their common wall exactly"
+
+# Measuring the same scan more finely must give the SAME model, only with
+# better-resolved edges — that is what lets the export re-cut at a finer
+# raster than step 4 works at. _fill_gaps' kernels were in pixels, so a finer
+# map bridged less dropout (81% -> 61% coverage of the profile on a real
+# scan) and every tier shrank; finer was worse, not better.
+_inside = maps.sil_mask > 0
+_cov = np.isfinite(maps.hR)[_inside].mean()
+_fine = core.measure_maps(verts_o, faces, sil, px=0.2)
+_cov_f = np.isfinite(_fine.hR)[_fine.sil_mask > 0].mean()
+_ref = [dict(t) for t in tiers]
+core.segment_all(_fine, _ref, base, base_y0)
+print(f"  resolution independence: coverage {100*_cov:.1f}% at "
+      f"{maps.px} mm/px vs {100*_cov_f:.1f}% at {_fine.px} mm/px")
+for _o, _n in zip(tiers, _ref):
+    _p0 = sum(len(np.asarray(p)) for p in _o["polys"])
+    _p1 = sum(len(np.asarray(p)) for p in _n["polys"])
+    # The tolerance is ASYMMETRIC, because measure_maps' conservative
+    # rasterisation biases every outline outward by ~half a pixel: refining the
+    # raster is SUPPOSED to shed that, and the amount it sheds is
+    # perimeter * dpx/2 — which for a small round island is a large fraction of
+    # its area (the 8 mm boss goes 55.5 -> 51.4 mm2, true 50.3). Growing is
+    # still capped at 6%: a finer raster resolving MORE frame would mean the
+    # coarse map had missed some, which is the regression this test exists for
+    # (fixed pixel kernels once cost 81% -> 61% of the profile).
+    _peri = sum(float(np.linalg.norm(np.roll(np.asarray(p), -1, 0)
+                                     - np.asarray(p), axis=1).sum())
+                for p in _o["polys"])
+    _shed = 1.5 * _peri * (maps.px - _fine.px) / 2
+    _d = _n["area_mm2"] - _o["area_mm2"]
+    print(f"    {_n['name']:4s} {_n['side']:>5s}: area {_o['area_mm2']:8.1f} -> "
+          f"{_n['area_mm2']:8.1f} mm2 ({_d:+6.1f}, may shed {_shed:5.1f}), "
+          f"{_p0:3d} -> {_p1:4d} pts")
+    assert -_shed - 0.06 * _o["area_mm2"] < _d < 0.06 * _o["area_mm2"], \
+        f"{_n['name']} changed area when re-measured finely"
+# (point counts can go either way: these synthetic tiers are axis-aligned
+# rectangles, which a finer raster describes with FEWER points, not more.
+# On an organic scan boundary it is the other way round.)
+assert abs(_cov_f - _cov) < 0.05, (_cov, _cov_f)
+
+# a small round island (a screw-clearance cylinder) must not be flattened to a
+# triangle by the coarse tolerance a long straight edge needs
+_disc = np.stack([12 + 1.75 * np.cos(np.linspace(0, 2*np.pi, 33)[:-1]),
+                  8 + 1.75 * np.sin(np.linspace(0, 2*np.pi, 33)[:-1])], 1)
+_kept = core._clip_to_silhouette([_disc], _sil2, simplify_mm=1.0)[0]
+_a_in, _a_out = core._poly_area(_disc), core._poly_area(_kept)
+print(f"  3.5 mm circle: 32 pts -> {len(_kept)} pts, area {_a_in:.2f} -> "
+      f"{_a_out:.2f} mm2 ({100*(_a_out/_a_in - 1):+.1f}%)")
+assert len(_kept) >= 8, f"circle collapsed to {len(_kept)} points"
+assert abs(_a_out / _a_in - 1) < 0.05, "simplification must keep the footprint"
 
 # the rail's through-hole must be swallowed, like the silhouette swallows
 # the magwell window
@@ -208,9 +341,71 @@ print(f"  boss: grow 0 -> {by[('boss', 'right')]['area_mm2']:.0f} mm², "
       f"grow 2 mm -> {grown['area_mm2']:.0f} mm²")
 assert grown["area_mm2"] > by[("boss", "right")]["area_mm2"]
 
+# ---- NON-AXIS-ALIGNED features. Rectangles cannot catch staircasing of a
+# diagonal boundary or over-simplification of a curved one, which is where
+# every artefact in this area has actually shown up.
+def _island_at(t, cx, cz):
+    for p in t["polys"]:
+        p = np.asarray(p)
+        if (p[:, 0].min() - 1 < cx < p[:, 0].max() + 1
+                and p[:, 1].min() - 1 < cz < p[:, 1].max() + 1):
+            return p
+    raise AssertionError(f"no island of tier {t['name']} near ({cx}, {cz})")
+
+
+_rib = _island_at(by[("rib", "right")], 24, -35)
+_u = np.array([20.0, 34.0]); _u /= np.linalg.norm(_u)
+_nrm = np.array([-_u[1], _u[0]]) * 2.0
+_strip = np.array([[14, -52] + _nrm, [34, -18] + _nrm,
+                   [34, -18] - _nrm, [14, -52] - _nrm])
+_off = _gaps(_rib, [_strip])
+print(f"  diagonal rib: {len(_rib)} pts, area {core._poly_area(_rib):.1f} mm2 "
+      f"(true 157.6), vertices within {_off.max():.3f} mm of the true strip")
+assert len(_rib) <= 9, f"{len(_rib)} points on a 4-corner strip — staircasing?"
+assert _off.max() < 1.0, "rib outline wandered off the real feature"
+# The bias is DIRECTIONAL, not symmetric. measure_maps rasterises
+# conservatively — a pixel takes any triangle overlapping its square — so a
+# feature comes out about half a pixel oversized per side, which on a 4 mm-wide
+# rib at 0.5 mm/px is ~12% of area. That is the safe direction (a fat
+# subtraction solid costs grip wall; a thin one fouls the frame) and it is why
+# the rib must never measure UNDER true area. Testing pixel centres instead
+# put it 7.7% under, and the excess has to shrink as the raster gets finer.
+_a_rib = core._poly_area(_rib)
+_rib_f = _island_at([t for t in _ref if t["name"] == "rib"][0], 24, -35)
+_a_rib_f = core._poly_area(_rib_f)
+print(f"  rib area bias: {_a_rib - 157.6:+.1f} mm2 at {maps.px} mm/px -> "
+      f"{_a_rib_f - 157.6:+.1f} mm2 at {_fine.px} mm/px")
+assert 157.6 <= _a_rib < 1.15 * 157.6, _a_rib
+assert 157.6 <= _a_rib_f < _a_rib, "the outward bias must shrink with px"
+
+_rb = _island_at(by[("rboss", "left")], 25, 15)
+_a_rb = core._poly_area(_rb)
+_rb_f = _island_at([t for t in _ref if t["name"] == "rboss"][0], 25, 15)
+_a_rb_f = core._poly_area(_rb_f)
+_r_true = np.pi * 16
+print(f"  round boss: {len(_rb)} pts, area {_a_rb:.1f} mm2 at {maps.px} mm/px -> "
+      f"{_a_rb_f:.1f} at {_fine.px} (true circle r=4 -> {_r_true:.1f})")
+assert len(_rb) >= 10, f"circle flattened to {len(_rb)} points"
+# Same directional bias as the rib, and worst on a small island: an 8 mm circle
+# has 25 mm of perimeter around 50 mm2 of area, so half a pixel outward at
+# 0.5 mm/px is +12%. Over is safe, under is not, and it has to converge.
+assert _r_true <= _a_rb < 1.15 * _r_true, _a_rb
+assert _r_true <= _a_rb_f < _a_rb, "the outward bias must shrink with px"
+
 # ---- coverage: the tier stack must not leave the frame under-thick
 cov = core.coverage_report(maps, tiers, base, base_y0)
-print("coverage:", cov)
+print("coverage as picked:",
+      {k: (v["short_mm"], v["area_mm2"]) for k, v in cov.items()})
+if max(cov[s]["short_mm"] for s in ("left", "right")) > 0.4:
+    # The diagonal rib's end comes up a sliver short: a dropped triangle
+    # there drags the measured surface just under the threshold. That is what
+    # coverage_report is for, and `grow` is the remedy — exercise both rather
+    # than asserting the wart is or is not present.
+    by[("rib", "right")]["grow_mm"] = 0.5
+    core.segment_all(maps, tiers, base, base_y0)
+    cov = core.coverage_report(maps, tiers, base, base_y0)
+    print("coverage after growing the rib 0.5 mm:",
+          {k: (v["short_mm"], v["area_mm2"]) for k, v in cov.items()})
 for side in ("left", "right"):
     assert cov[side]["short_mm"] < 0.4, f"{side} left under-thick"
 # drop the top tier and the boss becomes under-thick by ~1 mm
@@ -244,12 +439,14 @@ by_key = {s["key"]: s for s in model}
 base_sk = by_key["00_base"]
 assert abs((base_sk["y_hi"] - base_sk["y_lo"]) - (base + 2 * CLEAR)) < 1e-6
 # right tier 3 is the boss: its outer face must be the scan's, plus clearance
-boss_sk = [s for s in model if s["key"].startswith("R3")][0]
+boss_sk = max((s for s in model if s.get("side") == "right"),
+              key=lambda s: s["y_hi"])          # the tallest right tier
 assert abs(boss_sk["y_hi"] - (14.0 + CLEAR)) < 0.4, boss_sk["y_hi"]
 # the clearance-grown outline must enclose the nominal one
 nominal = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
                             clearance=0.0)
-n_boss = [s for s in nominal if s["key"].startswith("R3")][0]
+n_boss = max((s for s in nominal if s.get("side") == "right"),
+             key=lambda s: s["y_hi"])
 poly_g = _Path(boss_sk["loops"][0])
 assert all(poly_g.contains_point(p) for p in n_boss["loops"][0]), \
     "clearance must grow the outline outward"
@@ -270,7 +467,9 @@ def cad_faces_at(model, x, z):
 
 
 for name, (x, z), exp_l, exp_r in [("rail", (0, 40), -13.0, 13.0),
-                                   ("grip", (30, -30), -11.0, 11.0),
+                                   # clear of the rib, the boss and the round
+                                   # boss — every one of which is proud here
+                                   ("grip", (30, 20), -11.0, 11.0),
                                    ("tang", (-70, 10), -6.0, 6.0),
                                    ("boss", (0, 4), -11.0, 14.0)]:
     lo, hi = cad_faces_at(model, x, z)

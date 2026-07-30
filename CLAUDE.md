@@ -32,6 +32,11 @@ printing for fit prototypes.
   requirements.txt). Do not add trimesh/manifold3d/meshlib/shapely without
   discussing — the constraint was plain pip wheels, no mesh stack. scipy and
   scikit-image went out with the voxel build; keep it that way.
+- The export re-cuts the tiers on a finer raster than step 4 uses
+  (`App._refined_regions`, `export px`, default 0.2 mm vs the 0.5 mm working
+  map). It works on COPIES so the interactive state is untouched, and if a
+  tier's area moves by more than 5% it keeps its step-4 outline and says so —
+  refining is meant to move edges, not change what is included.
 - The output is CAD, not mesh. `sketch_model()` + `export_cad()`: the tier
   model IS a sketch-and-extrude model, so it exports losslessly as one DXF
   per sketch (base outline, each tier, each extra) + `all_sketches.dxf` (one
@@ -84,9 +89,54 @@ printing for fit prototypes.
   save_stl outside make_synthetic.py.
 - The tier model (core of the tool — read core.py's module docstring):
   - `measure_maps()` measures where the scan's left and right faces sit per
-    side-view pixel (hL, hR, positive outward from Y=0). It samples the
-    TRIANGLE SURFACES, not just vertices — a coarsely tessellated face
-    otherwise leaves holes that split a tier's outline in two;
+    side-view pixel (hL, hR, positive outward from Y=0). It RASTERISES the
+    triangles (`_raster_minmax`, scan conversion with Y interpolated at each
+    pixel), the same way `extract_silhouette` rasterises with fillPoly. That
+    is why the two now produce outlines of the same quality, which they did
+    not before. Do NOT go back to scattering sample points over the
+    triangles: random placement is Poisson, so it left 26% of in-outline
+    pixels empty at px=0.5 and 52% at px=0.1 — the finer the raster, the
+    emptier — and the grey-close that patched those holes is what put a
+    ~2.5 mm staircase on every diagonal tier boundary (user-reported, via
+    OpenSCAD, on a feature that was a plain rectangular prism). Rasterising
+    costs the same order (O(covered pixels)) and is exact. On the user's
+    761 k-triangle scan it is ~1.3 s at px=0.5 against 0.4 s for the old
+    sampler — worth it, and the busy badge covers it;
+  - rasterisation is CONSERVATIVE: a pixel takes any triangle overlapping its
+    square, not just one covering its centre (exact test — Minkowski sum of
+    triangle and pixel square = the three edge half-planes offset by each
+    edge's support). Features therefore come out ~half a pixel oversized per
+    side, which is the errs-thick direction and is also the bias the tier code
+    was tuned against. Testing centres alone put the synthetic's 4 mm diagonal
+    rib 7.7% UNDER area — i.e. too thin, the dangerous direction. The excess
+    must shrink as px shrinks; test_pipeline asserts both;
+  - `_raster_minmax` buckets triangles by bounding-box size and rasterises
+    each bucket as one array. The window must be the bucket's LARGEST member —
+    sizing it from the bucket's lower bound silently truncated every triangle
+    above that bound, and took 8 mm off the end of the synthetic's rib, whose
+    outer face is two 39 mm triangles. test_pipeline rasterises one big
+    diagonal triangle of known area to pin this down;
+  - measuring the SAME scan at a different px must give the same model with
+    better-resolved edges — that invariant is what lets the export re-cut
+    finer than step 4 works at. Everything in `_fill_gaps` and
+    `segment_tier` is therefore sized in MILLIMETRES and divided by px.
+    `_fill_gaps` used fixed pixel kernels, so it bridged 2.5 mm of dropout at
+    px=0.5 but 0.75 mm at px=0.15: coverage of the profile fell 81% -> 61% on
+    a real scan and every tier shrank, so a finer raster made the output
+    WORSE (39 fragmented islands instead of 5). Denser sampling does not fix
+    that — it is not a sampling problem. test_pipeline asserts tier areas
+    hold within 6% across resolutions. `_fill_gaps`' reach also scales with
+    the SCAN'S TESSELLATION (`_tess_mm`, median edge length): a dropped face
+    punches a hole one triangle wide, which a coarse raster cannot resolve
+    and a fine one can. Its kernels are ELLIPSE, never square — a square
+    structuring element quantises a diagonal edge to its own size, and these
+    kernels are millimetres across. And it grey-closes with the invalid
+    pixels MASKED (`_grey_close_masked`): filling them with the map's minimum
+    and closing over the lot lets the erosion half drag that minimum a full
+    kernel radius INTO valid data, so every dropout and the whole profile rim
+    came back short. Measured on the real scan, finer is now genuinely
+    better — 86.8% of the tier outlines are straight to 0.1 mm at px=0.2
+    against 37.9% before, from 354 points instead of 3208;
   - base tier = the whole silhouette at the thickness of the THINNEST part
     of the frame, centred on `base_y0` (which is NOT 0 when the frame is
     asymmetric: step 1 centres on the bbox, which is the wrong plane then,
@@ -104,16 +154,73 @@ printing for fit prototypes.
     frame. `coverage_report()` measures what the stack still leaves short —
     that is the "have I picked enough tiers?" number;
   - half-pixel bookkeeping is subtle and was tuned against the tests: the
-    outline is NOT auto-dilated (sampling bias outward ≈ contour inset), the
-    speckle-killing MORPH_OPEN is skipped on the silhouette rim (it would
-    nibble a sliver off and leave that rim under-thick), and
-    coverage_report dilates the built map by 1 px before comparing;
+    outline is NOT auto-dilated (the raster's deliberate outward half-pixel ≈
+    contour inset), the speckle-killing MORPH_OPEN is skipped on the
+    silhouette rim (it would nibble a sliver off and leave that rim
+    under-thick), the `spill` that lets a tier reach past the coarse
+    `sil_mask` dilates by ONE pixel not two (two also spreads the mask
+    TANGENTIALLY along the profile, which put a tier a pixel past the end of
+    its own footprint and 0.45 mm proud of the tier below — and the snap
+    cannot repair that, because the vertex is already exactly on the
+    silhouette and snapping takes the NEAREST reference), and
+    `coverage_report` dilates the built map by 1 px and judges only pixels
+    two px inside the profile. That last one matters: the map reaches up to
+    two pixels past the profile (one from grid padding, half from conservative
+    rasterisation) and a tier is clipped to the profile, so that rim can never
+    be covered — left in, it reported the rail's 13 mm face as a 7 mm hole;
   - a tier is cut on the coarse map grid but clipped to the profile on the
-    SILHOUETTE's grid (`_clip_to_silhouette`), then boundary vertices within
-    0.35 mm of `sil.polygon` are snapped exactly onto it. Clipping on the
+    SILHOUETTE's grid (`_clip_to_silhouette`). Inside that: SNAP to
+    `sil.polygon` first (vertices within 0.35 mm), THEN simplify, then snap
+    again. The order is load-bearing — snapped runs are collinear, so
+    simplifying can only drop redundant points from them, never pull them off
+    the profile. That frees the tolerance to be `2 * maps.px` (the map pixel
+    is what limits the boundary's accuracy, since it is a thickness step
+    measured on that grid). Simplifying first forced a tolerance fine enough
+    to protect the profile, which then faithfully traced the map's 0.5 mm
+    staircase: a straight block edge came out visibly jagged in OpenSCAD
+    (user-reported). Interpolating the height map does NOT fix that — the
+    boundary is a step edge and max-per-pixel sampling pins it to ±1 pixel
+    however finely you resample; the answer is to not imply more precision
+    than the measurement has. test_pipeline feeds a synthetic 0.5 mm
+    staircase through and asserts it comes out as 2 points. Clipping on the
     map grid instead left every tier ~0.7 mm short of the profile — a ledge
     in the built solid that grow_mm could never close, because growing then
     clipped back to the same inset boundary (user-reported, via OpenSCAD).
+    The snap references are the silhouette AND the tier BELOW (`_prev_tier`),
+    because a tall feature is built as several stacked extrusions and their
+    shared wall has to be one wall — otherwise the sub-millimetre
+    disagreements terrace it (user-reported). `snap_tol` is `2.5 * maps.px`:
+    each contour's position is known to about a pixel, so two contours can
+    differ by a couple of pixels from noise alone, while a genuine difference
+    (a ramped surface, where terracing IS the right answer) is far larger.
+    `segment_all` therefore runs in stacking order.
+  - the simplify tolerance is chosen PER ISLAND as the coarsest of
+    (cap, cap/2, cap/4, cap/8, 0.10 mm) that keeps the island's area within
+    `_SIMPLIFY_AREA_TOL` (0.5%), so simplification can never quietly shrink a
+    feature. One fixed number cannot serve a 100 mm straight edge (needs ~1 mm
+    or it traces the staircase), a 3 mm screw-clearance circle (1 mm makes it
+    a trapezoid) and a 2 mm rib (a size-based rule flattens it). A 32-point
+    circle survives as 11 points, area within 2.2%. 0.02 is measured, not
+    guessed: 0.05 drops a 3.4 mm screw-clearance circle from 12 points to 8,
+    and 0.01 blows a 4 mm-wide straight-sided rib up from 5 points to 30.
+  - `segment_tier` barely simplifies its own contour before handing it to
+    `_clip_to_silhouette` — HALF a pixel. It used to use `simplify_mm / px`
+    (1.5 px at the export raster), and the careful per-island pass downstream
+    can only drop points, never restore ones already thrown away: that is what
+    made screw-clearance cylinders octagons ("cylinders get rather brutally
+    simplified to trapezoids"). Loosening the area tolerance was NOT the fix
+    and made it worse. The contour is already run-length collapsed by
+    CHAIN_APPROX_SIMPLE, so keeping it costs almost nothing.
+  - the PROFILE's corners are pinned into a tier's boundary before simplifying
+    (`_pin_corners`), and each run BETWEEN pinned points is simplified
+    separately (`_simplify_protected`, approxPolyDP with closed=False so the
+    ends survive). approxPolyDP is otherwise free to cut across a corner — it
+    only has to stay within eps of the contour — so the base tier and a tier
+    stacked on it rounded the same profile corner differently and their walls
+    stopped matching (0.72 mm apart). Pin the silhouette ONLY, not the tier
+    below: pinning the tier below propagates its vertex pattern up the stack,
+    and a small round island it happened to describe as an octagon then forced
+    every tier above it to be an octagon too.
     For the same reason `_grow_loops` snaps its raster to a shared lattice:
     the base and a tier that meets it must come out of the clearance offset
     with the same edge.
@@ -190,8 +297,18 @@ printing for fit prototypes.
 
 - `python make_synthetic.py` — regenerates the synthetic frame scan (mock
   frame with magwell window, widths 26/22/12 mm, a RIGHT-SIDE-ONLY
-  trigger-bar boss making the frame asymmetric, vertex jitter, 2% dropped
-  faces).
+  trigger-bar boss, vertex jitter, 2% dropped faces) plus two deliberately
+  NON-AXIS-ALIGNED features: a diagonal rib across the right grip wall and a
+  round boss on the left. Rectangles cannot catch staircasing of a diagonal
+  tier boundary or over-simplification of a curved one, which is where every
+  artefact in this area has actually shown up — a fixed synthetic of boxes
+  passed happily while a real scan came out jagged. `add_prism()` extrudes an
+  arbitrary XZ polygon, so add awkward shapes rather than more boxes.
+  The two bosses are DIFFERENT heights on purpose (right +14.0, left -14.5)
+  so the Y bounding-box centre is not the frame's mid-plane and `base_y0` has
+  work to do; keep it that way.
+  Probe points in the tests have to dodge all of these — several assertions
+  broke when the rib landed near a "plain grip wall" reference point.
 - `python test_pipeline.py` — end-to-end core test with assertions (window
   filled, tier heights ±0.4 mm, tiers nest, interior holes swallowed,
   coverage clean and correctly flagging a missing tier, a tier sharing the

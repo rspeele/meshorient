@@ -280,46 +280,190 @@ def _minmax_by_cell(lin, vals, n):
     return lo, hi
 
 
-def _fill_gaps(m, sil_small, k=5):
-    """Fill scanner dropouts by grey-closing; keep NaN outside the outline."""
-    nan = ~np.isfinite(m)
-    filled = np.where(nan, 0.0, m).astype(np.float32)
-    closed = cv2.morphologyEx(filled, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
-    out = np.where(nan, closed, m)
-    out[nan & (closed <= 0)] = np.nan        # nothing nearby to borrow from
+def _tess_mm(verts, faces):
+    """The scan's own triangle scale (median edge length), in mm.
+
+    A dropped face leaves a hole this big, so it is the right yardstick for
+    how far _fill_gaps has to reach — a fixed millimetre guess is either too
+    small for a coarse scan or needlessly destructive on a fine one.
+    """
+    if faces is None or len(faces) == 0:
+        return 0.0
+    tv = verts[faces]
+    e = np.linalg.norm(tv[:, [1, 2, 0]] - tv, axis=2)
+    return float(np.median(e))
+
+
+def _grey_close_masked(m, ok, kern):
+    """Grey close that IGNORES invalid pixels instead of reading them as data.
+
+    Returns (closed, reached), reached being where the kernel found any valid
+    pixel at all.
+
+    The masking is the whole point. Filling the invalid pixels with the map's
+    minimum and closing over the lot — which is what this used to do — lets
+    the erosion half of the close drag that minimum a full kernel radius INTO
+    valid data. Every dropout and the entire silhouette rim came back short,
+    and enlarging the kernel to match the scan's tessellation made it worse
+    rather than better: the synthetic's diagonal rib lost 8 mm off the end
+    that runs out to the frame's rear edge. Dilate with the invalid pixels at
+    -inf so they cannot raise anything, then erode with whatever the dilation
+    did not reach at +inf so it cannot lower anything.
+    """
+    NEG, POS = -1e9, 1e9
+    d = cv2.dilate(np.where(ok, m, NEG).astype(np.float32), kern)
+    reached = d > NEG / 2
+    e = cv2.erode(np.where(reached, d, POS).astype(np.float32), kern)
+    return e, e < POS / 2
+
+
+def _fill_gaps(m, sil_small, px, gap_mm=2.5, pit_mm=1.0, tess_mm=0.0):
+    """Fill scanner dropouts by grey-closing; keep NaN outside the outline.
+
+    The kernels are sized in MILLIMETRES, not pixels. They used to be fixed
+    pixel counts, which quietly made this whole function resolution
+    dependent: it bridged 2.5 mm of dropout at px=0.5 but only 0.75 mm at
+    px=0.15, so re-measuring a scan more finely LOST coverage (81% -> 61% of
+    the profile on a real scan) and every tier shrank. Anything specified in
+    pixels here has to be re-derived from px.
+
+    They also scale with the scan's TESSELLATION. A dropped triangle punches a
+    hole one triangle wide, which a coarse raster cannot resolve but a fine
+    one can: the synthetic's 2% dropped faces left 16% of the diagonal rib's
+    top face reading the wall behind it at px=0.1 (all of it survived at 0.5),
+    and the rib came out 20% under area. Reach has to follow the mesh, not the
+    raster.
+
+    ELLIPSE kernels, never square. A square structuring element quantises a
+    diagonal edge to its own size, and since these kernels are millimetres
+    across that put a ~2.5 mm staircase on tier boundaries which no raster
+    resolution could remove (user-reported, via OpenSCAD). An ellipse rounds
+    concave corners by its radius and leaves everything else where it was.
+    """
+    reach = max(1.0, 2.0 * tess_mm)
+    kern = lambda mm: cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, ((max(3, int(round(mm / px)) | 1),) * 2))
+    ok = np.isfinite(m)
+    filled, reached = _grey_close_masked(m, ok, kern(max(gap_mm, reach)))
+    out = np.where(ok, m, np.where(reached, filled, np.nan))
     # A hole in the outer face lets an inner one (a magwell wall, say) show
-    # through as a pit. A 3x3 grey close pulls those back up to their
-    # neighbours without moving real edges.
+    # through as a pit. A grey close pulls those back up to their neighbours
+    # without moving real edges.
     ok = np.isfinite(out)
-    lo = np.nanmin(out) if ok.any() else 0.0
-    dense = np.where(ok, out, lo).astype(np.float32)
-    out = np.where(ok, cv2.morphologyEx(dense, cv2.MORPH_CLOSE,
-                                        np.ones((3, 3), np.uint8)), np.nan)
+    pit, reached = _grey_close_masked(out, ok, kern(max(pit_mm, reach)))
+    out = np.where(ok, np.where(reached, pit, out), np.nan)
     out[sil_small == 0] = np.nan
     return out
 
 
-def _surface_samples(verts, faces, px, seed=0, max_per_tri=4096):
-    """Points scattered over the triangles, ~2 per pixel of projected area.
+def _raster_minmax(verts, faces, px, x0, z0, w, h, chunk=1 << 22):
+    """Per-pixel min/max of Y over the triangles, by RASTERISING them.
 
-    Sampling the surface rather than just the vertices keeps the maps free of
-    holes when the mesh is tessellated coarser than the map resolution — a
-    hole there splits a tier's outline in two.
+    Scan-converts every triangle's XZ projection and interpolates Y at each
+    pixel centre it covers, exactly the way extract_silhouette rasterises
+    with fillPoly. Coverage is therefore EXACT: a pixel has data iff the
+    surface actually projects onto its centre, at any px, and a straight
+    edge comes out as a one-pixel staircase.
+
+    This replaced scattering ~2 random points per pixel over each triangle.
+    Random placement is Poisson, so it left 26% of in-outline pixels empty at
+    px=0.5 and 52% at px=0.1 — finer rasters were emptier, not sharper. Those
+    holes then got patched by _fill_gaps' grey-close, and since a square
+    structuring element quantises a diagonal edge to its own size, every tier
+    boundary inherited a ~2.5 mm staircase that no amount of px could fix
+    (user-reported, via OpenSCAD; the offending feature was a plain
+    rectangular prism). Do not go back to point sampling: the cost here is
+    O(covered pixels), the same order, and it is exact.
+
+    Rasterisation is CONSERVATIVE — a pixel takes a triangle that overlaps
+    its square at all, not just one covering its centre. Two reasons. It errs
+    thick, which is this tool's standing rule. And it keeps the half-pixel
+    bookkeeping the tier code was tuned against: the old sampler's per-pixel
+    max over random points biased every feature outward by about half a
+    pixel, which cancelled findContours' inset. Testing centres alone dropped
+    that bias and the synthetic's 4 mm diagonal rib came out 7.7% under area.
+    The overlap test restores it deliberately. The test is exact — the
+    Minkowski sum of a triangle and the pixel square is the three edge
+    half-planes offset by each edge's support, plus the expanded bounds.
     """
+    lo = np.full(h * w, np.inf)
+    hi = np.full(h * w, -np.inf)
     if faces is None or len(faces) == 0:
-        return verts
+        return lo, hi
     tv = verts[faces]                                    # (M,3,3)
-    a = tv[:, 1][:, [0, 2]] - tv[:, 0][:, [0, 2]]        # XZ edge vectors
-    b = tv[:, 2][:, [0, 2]] - tv[:, 0][:, [0, 2]]
-    area_px = 0.5 * np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) / (px * px)
-    n = np.clip(np.ceil(2 * area_px), 1, max_per_tri).astype(np.int64)
-    idx = np.repeat(np.arange(len(faces)), n)
-    rng = np.random.default_rng(seed)                    # deterministic
-    r1, r2 = rng.random(len(idx)), rng.random(len(idx))
-    s = np.sqrt(r1)
-    w = np.stack([1 - s, s * (1 - r2), s * r2], axis=1)  # barycentric
-    pts = np.einsum("ij,ijk->ik", w, tv[idx])
-    return np.vstack([verts, pts])
+    u = (tv[:, :, 0] - x0) / px                          # pixel coordinates;
+    v = (tv[:, :, 2] - z0) / px                          # pixel c is centred
+    y = tv[:, :, 1]                                      # exactly on u == c
+    # Pixels whose SQUARE the triangle can reach, so the bounds grow by the
+    # half-pixel the overlap test below allows.
+    c0 = np.maximum(np.ceil(u.min(1) - 0.5), 0).astype(np.int64)
+    c1 = np.minimum(np.floor(u.max(1) + 0.5), w - 1).astype(np.int64)
+    r0 = np.maximum(np.ceil(v.min(1) - 0.5), 0).astype(np.int64)
+    r1 = np.minimum(np.floor(v.max(1) + 0.5), h - 1).astype(np.int64)
+    e0u, e0v = u[:, 1] - u[:, 0], v[:, 1] - v[:, 0]
+    e1u, e1v = u[:, 2] - u[:, 0], v[:, 2] - v[:, 0]
+    det = e0u * e1v - e0v * e1u
+    sgn = np.where(det >= 0, 1.0, -1.0)
+    # Each edge's half-plane relaxed by the pixel square's support along its
+    # normal. Distance is edge_fn / |edge| and the support is
+    # 0.5*(|edge_u| + |edge_v|) / |edge|, so the |edge| cancels.
+    sl0 = 0.5 * (np.abs(e0u) + np.abs(e0v))                  # edge p0->p1
+    sl2 = 0.5 * (np.abs(e1u) + np.abs(e1v))                  # edge p0->p2
+    sl1 = 0.5 * (np.abs(e1u - e0u) + np.abs(e1v - e0v))      # edge p1->p2
+    ylo3, yhi3 = y.min(1), y.max(1)
+    bw, bh = c1 - c0 + 1, r1 - r0 + 1
+    live = np.flatnonzero((bw > 0) & (bh > 0) & (np.abs(det) > 1e-12))
+    if live.size == 0:
+        return lo, hi
+
+    idx_parts, y_parts = [], []
+    size = np.maximum(bw[live], bh[live])
+    # Bucket by bounding-box size so each batch is one rectangular array.
+    # Most triangles in a scan land in the smallest bucket.
+    order = np.argsort(size, kind="stable")
+    ssort = size[order]
+    edges = np.searchsorted(ssort, 2 ** np.arange(1, 32), side="left")
+    for lo_i, hi_i in zip(np.r_[0, edges], np.r_[edges, live.size]):
+        if hi_i <= lo_i:
+            continue
+        grp = live[order[lo_i:hi_i]]
+        # The window is the bucket's LARGEST member. Sizing it by the bucket's
+        # lower bound instead truncated every triangle above that bound, which
+        # silently dropped the far end of any triangle bigger than a pixel or
+        # two — 8 mm off the end of the synthetic's diagonal rib, whose outer
+        # face is two 39 mm triangles.
+        s = int(ssort[hi_i - 1])
+        step = max(1, chunk // (s * s))
+        for b in range(0, grp.size, step):
+            t = grp[b:b + step]
+            du = np.arange(s)
+            U = c0[t][:, None, None] + du[None, None, :]        # (n,s,s)
+            V = r0[t][:, None, None] + du[None, :, None]
+            pu = U - u[t, 0][:, None, None]
+            pv = V - v[t, 0][:, None, None]
+            d = det[t][:, None, None]
+            sg = sgn[t][:, None, None]
+            g2 = pu * e1v[t][:, None, None] - pv * e1u[t][:, None, None]
+            g0 = e0u[t][:, None, None] * pv - e0v[t][:, None, None] * pu
+            g1 = d - g0 - g2
+            ok = ((g0 * sg >= -sl0[t][:, None, None])
+                  & (g1 * sg >= -sl1[t][:, None, None])
+                  & (g2 * sg >= -sl2[t][:, None, None])
+                  & (U <= c1[t][:, None, None]) & (V <= r1[t][:, None, None]))
+            if not ok.any():
+                continue
+            # Clamped so a pixel just outside the triangle cannot extrapolate
+            # Y beyond the range the triangle actually spans.
+            yv = np.clip(y[t, 0][:, None, None]
+                         + (g2 / d) * (y[t, 1] - y[t, 0])[:, None, None]
+                         + (g0 / d) * (y[t, 2] - y[t, 0])[:, None, None],
+                         ylo3[t][:, None, None], yhi3[t][:, None, None])
+            idx_parts.append((V * w + U)[ok])
+            y_parts.append(yv[ok])
+    if not idx_parts:
+        return lo, hi
+    return _minmax_by_cell(np.concatenate(idx_parts),
+                           np.concatenate(y_parts), h * w)
 
 
 def measure_maps(verts, faces, sil: Silhouette = None, px=0.5) -> ThicknessMaps:
@@ -328,25 +472,24 @@ def measure_maps(verts, faces, sil: Silhouette = None, px=0.5) -> ThicknessMaps:
     With no silhouette (the Level step, which runs before one exists) the
     extent comes from the scan's own bounding box and nothing is masked out.
     """
-    pts = _surface_samples(verts, faces, px)
-    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
     if sil is not None:
         ex = sil.world_extent()
     else:
         pad = 3.0
-        ex = (x.min() - pad, x.max() + pad, z.min() - pad, z.max() + pad)
+        ex = (verts[:, 0].min() - pad, verts[:, 0].max() + pad,
+              verts[:, 2].min() - pad, verts[:, 2].max() + pad)
     x0, z0 = ex[0], ex[2]
     w = int(np.ceil((ex[1] - x0) / px)) + 1
     h = int(np.ceil((ex[3] - z0) / px)) + 1
-    ci = np.clip(((x - x0) / px).round().astype(int), 0, w - 1)
-    ri = np.clip(((z - z0) / px).round().astype(int), 0, h - 1)
-    ymin, ymax = _minmax_by_cell(ri * w + ci, y, h * w)
+    ymin, ymax = _raster_minmax(verts, faces, px, x0, z0, w, h)
 
     hL = (-ymin).reshape(h, w)               # positive outward, both sides
     hR = ymax.reshape(h, w)
     sil_small = (cv2.resize(sil.mask, (w, h), interpolation=cv2.INTER_NEAREST)
                  if sil is not None else np.full((h, w), 255, np.uint8))
-    return ThicknessMaps(_fill_gaps(hL, sil_small), _fill_gaps(hR, sil_small),
+    tess = _tess_mm(verts, faces)
+    return ThicknessMaps(_fill_gaps(hL, sil_small, px, tess_mm=tess),
+                         _fill_gaps(hR, sil_small, px, tess_mm=tess),
                          sil_small, x0, z0, px, sil)
 
 
@@ -392,37 +535,122 @@ def base_faces(base_thickness, base_y0=0.0):
     return base_y0 + base_thickness / 2.0, base_y0 - base_thickness / 2.0
 
 
-def _snap_to_polygon(poly, ref, tol):
-    """Pull vertices lying within tol of `ref`'s boundary exactly onto it.
+_SIMPLIFY_FLOOR = 0.10        # mm; finer than this just traces the raster
+_SIMPLIFY_AREA_TOL = 0.02     # accept the coarsest tolerance costing this much
+                              # footprint. Measured: 0.05 drops a 3.4 mm
+                              # screw-clearance circle from 12 points to 8,
+                              # 0.01 blows a 4 mm-wide straight-sided rib up
+                              # from 5 points to 30. Faceted cylinders were
+                              # NOT this number's fault — see segment_tier,
+                              # which used to pre-simplify at 1.5 px before
+                              # this pass ever ran.
 
-    Where a tier runs out to the edge of the frame, its outline and the base
-    outline must be the same line — a tenth of a millimetre of disagreement
-    shows up as a step in the built solid.
+
+def _poly_area(P):
+    """Absolute area of a closed polygon (shoelace)."""
+    x, y = np.asarray(P, float).T
+    return abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))) / 2.0
+
+
+def _pin_corners(P, refs, tol):
+    """Put reference CORNERS exactly on the outline; return their indices.
+
+    A tier that runs out to the frame's profile should use the profile's own
+    corner, not rediscover it. approxPolyDP is free to cut across a corner —
+    it only has to stay within eps of the contour — so the base tier and a
+    tier stacked on it rounded the same profile corner differently and their
+    walls stopped matching (0.72 mm apart on the synthetic). Pinning the
+    corner and simplifying only the runs BETWEEN pinned points keeps corners
+    shared and still lets the straight stretches collapse to two points.
     """
-    A = np.asarray(ref, float)
-    B = np.roll(A, -1, axis=0)
+    prot = {}
+    for r in refs:
+        for c in np.asarray(r, float):
+            d = np.linalg.norm(P - c, axis=1)
+            j = int(np.argmin(d))
+            if d[j] <= tol and j not in prot:
+                prot[j] = c
+    for j, c in prot.items():
+        P[j] = c
+    return P, np.array(sorted(prot), dtype=int)
+
+
+def _simplify_protected(P, prot, eps):
+    """approxPolyDP each run between pinned vertices, so those survive."""
+    if len(prot) == 0:
+        return cv2.approxPolyDP(P.astype(np.float32).reshape(-1, 1, 2),
+                                eps, True).reshape(-1, 2)
+    n, out = len(P), []
+    for k, i0 in enumerate(prot):
+        i1 = prot[(k + 1) % len(prot)]
+        idx = np.arange(i0, i1 + (n if i1 <= i0 else 0) + 1) % n
+        run = P[idx]
+        seg = (run if len(run) < 3 else
+               cv2.approxPolyDP(run.astype(np.float32).reshape(-1, 1, 2),
+                                eps, False).reshape(-1, 2))
+        out.append(seg[:-1])                 # the next run repeats this point
+    return np.vstack(out)
+
+
+def _snap_to_polygon(poly, refs, tol):
+    """Pull vertices within tol of any reference boundary exactly onto it.
+
+    Two outlines that nearly coincide must coincide EXACTLY, or the step
+    between them shows up as an artefact in the built solid. Two cases:
+    a tier running out to the edge of the frame (ref = the silhouette), and a
+    tier sharing a wall with the tier below it (ref = that tier's outline) —
+    a tall feature is built as several stacked extrusions, and if their
+    footprints disagree by a fraction of a millimetre you get a terraced wall
+    instead of one clean face.
+    """
+    P = np.asarray(poly, float)
+    if isinstance(refs, np.ndarray):
+        refs = [refs]
+    rr = [np.asarray(r, float) for r in refs if len(np.asarray(r)) >= 2]
+    if not rr or not len(P):
+        return P.copy()
+    A = np.vstack(rr)
+    B = np.vstack([np.roll(r, -1, axis=0) for r in rr])
     d = B - A
     L2 = np.einsum("ij,ij->i", d, d)
     L2 = np.where(L2 > 0, L2, 1.0)
-    out = np.array(poly, float)
-    for i, p in enumerate(out):
-        t = np.clip(np.einsum("ij,ij->i", p - A, d) / L2, 0.0, 1.0)
-        proj = A + t[:, None] * d
-        off = p - proj
-        k = int(np.argmin(np.einsum("ij,ij->i", off, off)))
-        if np.hypot(*off[k]) <= tol:
-            out[i] = proj[k]
+    Ad = np.einsum("mj,mj->m", A, d)
+    out = P.copy()
+    # nearest point on every segment for every vertex, in blocks: this runs on
+    # the raw contour (thousands of points), so it can be neither a Python
+    # loop nor one giant N x M temporary
+    for i in range(0, len(P), 4096):
+        Q = P[i:i + 4096]
+        t = np.clip((Q @ d.T - Ad) / L2, 0.0, 1.0)
+        proj = A[None, :, :] + t[:, :, None] * d[None, :, :]
+        off = Q[:, None, :] - proj
+        dist2 = np.einsum("nmj,nmj->nm", off, off)
+        k = np.argmin(dist2, axis=1)
+        rows = np.arange(len(Q))
+        close = dist2[rows, k] <= tol * tol
+        blk = out[i:i + 4096]
+        blk[close] = proj[rows, k][close]
     return out
 
 
 def _clip_to_silhouette(polys, sil: Silhouette, simplify_mm=0.2,
-                        min_area_mm2=2.0, snap_tol=0.35):
+                        min_area_mm2=2.0, snap_tol=0.35, refs=None):
     """Trim tier outlines to the frame profile, at the profile's resolution.
 
     Doing this on the coarse thickness-map grid left every tier a fraction
     of a millimetre short of the outline — a visible ledge that no amount of
     grow_mm could close, because growing then clipped back to the same
     inset boundary.
+
+    Order matters: SNAP to the profile first, then simplify. A tier boundary
+    running along the profile becomes collinear once snapped, so simplifying
+    can only drop redundant points from it, never pull it off the line. Doing
+    it the other way round forces a simplify tolerance fine enough to protect
+    the profile (0.2 mm), which then faithfully reproduces the thickness
+    map's own 0.5 mm staircase — a straight feature edge came out visibly
+    jagged (user-reported, seen in OpenSCAD). `simplify_mm` should therefore
+    be set from the MAP resolution, which is what limits the boundary's
+    accuracy, not from the silhouette's.
     """
     if sil is None or not polys:
         return polys
@@ -437,18 +665,45 @@ def _clip_to_silhouette(polys, sil: Silhouette, simplify_mm=0.2,
     _fill_union(img, conts)
     img = cv2.bitwise_and(img, sil.mask)
 
+    if refs is None:
+        refs = [np.asarray(sil.polygon)]
     cnts, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     out = []
     for c in cnts:
         if float(cv2.contourArea(c)) * sil.px ** 2 < min_area_mm2:
             continue
-        a = cv2.approxPolyDP(c, max(1.0, simplify_mm / sil.px), True)
-        a = a.reshape(-1, 2).astype(np.float64)
-        if len(a) < 3:
-            continue
+        a = c.reshape(-1, 2).astype(np.float64)
         world = np.stack([sil.x0 + a[:, 0] * sil.px,
                           sil.z0 + a[:, 1] * sil.px], axis=1)
-        out.append(_snap_to_polygon(world, sil.polygon, snap_tol))
+        world = _snap_to_polygon(world, refs, snap_tol)
+        # Pin the PROFILE's corners only. Pinning the tier below as well
+        # propagates its vertex pattern up the stack, and a small round island
+        # it happened to describe as an octagon then forced every tier above it
+        # to be an octagon too.
+        world, prot = _pin_corners(world, [np.asarray(sil.polygon)], snap_tol)
+        # Tolerance PER ISLAND, chosen by how much area it costs. One number
+        # cannot serve a 100 mm straight edge (wants ~1 mm, or it traces the
+        # map's staircase), a 3 mm screw-clearance circle (1 mm makes it a
+        # trapezoid) and a 2 mm-wide rib (which a size-based rule would
+        # flatten). Take the coarsest tolerance that keeps the footprint, so
+        # simplification can never quietly shrink a feature.
+        target = _poly_area(world)
+        cap = max(simplify_mm, _SIMPLIFY_FLOOR)
+        best = None
+        for eps in (cap, cap / 2, cap / 4, cap / 8, _SIMPLIFY_FLOOR):
+            a = _simplify_protected(world, prot, eps)
+            if len(a) < 3:
+                continue
+            best = a
+            if (target <= 0
+                    or abs(_poly_area(a) - target) <= _SIMPLIFY_AREA_TOL * target):
+                break
+        if best is None:
+            continue
+        world = best
+        # snapping again costs nothing and pins any vertex the simplifier
+        # nudged off a shared boundary back onto it
+        out.append(_snap_to_polygon(world.astype(np.float64), refs, snap_tol))
     return out
 
 
@@ -471,22 +726,29 @@ def tier_offset(tier, base_thickness, base_y0=0.0):
             + float(tier.get("add_mm", 0.0)))
 
 
+def _prev_tier(tiers, tier, base_thickness, base_y0=0.0):
+    """The tier immediately below this one on its own side, or None."""
+    side = tier["side"]
+    fo = tier_offset(tier, base_thickness, base_y0)
+    best, best_f = None, base_offset(side, base_thickness, base_y0)
+    for u in tiers:
+        if u is tier or region_kind(u) != "tier" or u.get("side") != side:
+            continue
+        f = tier_offset(u, base_thickness, base_y0)
+        if best_f < f < fo:
+            best, best_f = u, f
+    return best
+
+
 def _prev_offset(tiers, tier, base_thickness, base_y0=0.0):
     """The offset of the tier immediately below this one, on its own side.
 
     That is the threshold this tier segments against: everything standing
     proud of the tier below gets pulled into this tier's outline.
     """
-    side = tier["side"]
-    fo = tier_offset(tier, base_thickness, base_y0)
-    prev = base_offset(side, base_thickness, base_y0)
-    for u in tiers:
-        if u is tier or region_kind(u) != "tier" or u.get("side") != side:
-            continue
-        f = tier_offset(u, base_thickness, base_y0)
-        if prev < f < fo:
-            prev = f
-    return prev
+    prev = _prev_tier(tiers, tier, base_thickness, base_y0)
+    return (tier_offset(prev, base_thickness, base_y0) if prev is not None
+            else base_offset(tier["side"], base_thickness, base_y0))
 
 
 def make_tier(maps: ThicknessMaps, x, z, side, base_thickness, base_y0=0.0,
@@ -564,8 +826,15 @@ def segment_tier(maps: ThicknessMaps, tiers, tier, base_thickness,
         # sits inside the real profile. Let the mask spill over that edge —
         # but ONLY outside it, so interior tier boundaries do not fatten —
         # and let the clip below put it back on the real profile.
+        # ONE pixel, not two: sil_mask is a nearest-neighbour downsample of
+        # the real profile, so it can only be inset by up to a pixel, and a
+        # wider dilation also spreads the mask TANGENTIALLY along the profile.
+        # That put a tier a pixel past the end of its own footprint down the
+        # frame's front edge, 0.45 mm proud of the tier below it — which the
+        # snap could not repair, because the vertex was already exactly on the
+        # silhouette and snapping takes the nearest reference.
         spill = cv2.bitwise_and(
-            cv2.dilate(img, np.ones((5, 5), np.uint8)),
+            cv2.dilate(img, np.ones((3, 3), np.uint8)),
             cv2.bitwise_not(maps.sil_mask))
         img = cv2.bitwise_or(img, spill)
 
@@ -574,15 +843,40 @@ def segment_tier(maps: ThicknessMaps, tiers, tier, base_thickness,
     for c in cnts:
         if float(cv2.contourArea(c)) * px * px < min_area_mm2:
             continue
-        approx = cv2.approxPolyDP(c, max(1.0, simplify_mm / px), True)
+        # Barely simplify here — HALF a pixel. This runs before the careful
+        # per-island pass in _clip_to_silhouette, and that pass can only drop
+        # points, never restore ones already thrown away: at simplify_mm/px
+        # (1.5 px at the export raster) it decided a 3.4 mm screw-clearance
+        # circle was an octagon, and no tolerance downstream could round it
+        # back out. The contour is already run-length collapsed by
+        # CHAIN_APPROX_SIMPLE, so this costs almost nothing.
+        approx = cv2.approxPolyDP(c, 0.5, True)
         approx = approx.reshape(-1, 2).astype(np.float64)
         if len(approx) < 3:
             continue
         polys.append(np.stack([maps.x0 + approx[:, 0] * px,
                                maps.z0 + approx[:, 1] * px], axis=1))
-    # a grown outline may now stick out past the frame; trim it there, at
-    # the profile's own resolution so the two share an edge exactly
-    polys = _clip_to_silhouette(polys, maps.sil, min_area_mm2=min_area_mm2)
+    # A grown outline may now stick out past the frame; trim it there, at the
+    # profile's own resolution so the two share an edge exactly. Snap to the
+    # profile AND to the tier below: a tall feature is built as several
+    # stacked extrusions, and their walls have to be the same wall or the
+    # steps between them show as terracing. Simplify to twice the map pixel
+    # at most — the boundary is a thickness step measured on that grid, so it
+    # is only known to about a pixel.
+    refs = []
+    if maps.sil is not None:
+        refs.append(np.asarray(maps.sil.polygon))
+    below = _prev_tier(tiers, tier, base_thickness, base_y0)
+    if below is not None:
+        refs += [np.asarray(p) for p in (below.get("polys") or [])]
+    # snap_tol scales with the map pixel: each contour's position is only
+    # known to about a pixel, so two contours can disagree by a couple of
+    # pixels from noise alone. Inside that they are the same wall; a genuine
+    # difference (a ramped surface, where terracing is the correct answer) is
+    # much larger than this.
+    polys = _clip_to_silhouette(polys, maps.sil, min_area_mm2=min_area_mm2,
+                                simplify_mm=2.0 * px, refs=refs or None,
+                                snap_tol=max(0.35, 2.5 * px))
 
     total = 0.0
     for p in polys:
@@ -596,8 +890,12 @@ def segment_tier(maps: ThicknessMaps, tiers, tier, base_thickness,
 
 
 def segment_all(maps: ThicknessMaps, regions, base_thickness, base_y0=0.0):
-    """Re-segment every tier — thresholds are relative, so they all move."""
-    for t in regions:
+    """Re-segment every tier — thresholds are relative, so they all move.
+
+    In stacking order, because each tier snaps its shared wall onto the tier
+    below and so needs that one's outline to exist already.
+    """
+    for t in sort_tiers(regions):
         if region_kind(t) == "tier":
             segment_tier(maps, regions, t, base_thickness, base_y0)
 
@@ -654,7 +952,15 @@ def coverage_report(maps: ThicknessMaps, regions, base_thickness, base_y0=0.0,
         # a tier's outline has to cut somewhere inside the boundary pixel, so
         # forgive a one-pixel transition band; real gaps are far wider
         built = cv2.dilate(built, np.ones((3, 3), np.uint8))
-        short = np.where(np.isfinite(m), m - built, -np.inf)
+        # Judge only pixels properly inside the profile. The map reaches up to
+        # two pixels PAST it — one from the grid's padding, half from
+        # measure_maps' conservative rasterisation — and a tier is clipped to
+        # the profile, so that rim can never be covered by one. Left in, it
+        # reported the rail's 13 mm face as a 7 mm hole over a 1-2 px ring.
+        # Whether tiers actually reach the profile is a separate question, and
+        # snapping already answers it exactly.
+        inside = cv2.erode(maps.sil_mask, np.ones((5, 5), np.uint8))
+        short = np.where(np.isfinite(m) & (inside > 0), m - built, -np.inf)
         i = int(np.argmax(short))
         r, c = np.unravel_index(i, short.shape)
         out[side] = {"short_mm": round(float(short[r, c]), 2),

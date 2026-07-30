@@ -151,6 +151,20 @@ outlines by hand — which is the point — extrude, union.
 the finished subtraction solid; set it to 0 for nominal geometry. The DXFs
 use only `LINE` and `CIRCLE` entities, which every importer accepts.
 
+`export px` re-measures the scan and re-cuts the tiers at a finer raster than
+step 4 works at — step 4 stays at `map px` (0.5 mm) to keep clicking
+responsive, but the output can afford better. 0.2 mm is a good default: on a
+real scan it resolves the boundaries about twice as well for a couple of
+seconds' work, and *fewer* points come out, not more, because a better-measured
+edge simplifies to a cleaner line (354 points instead of 3208, with 87% of the
+outline straight to 0.1 mm instead of 38%). It re-cuts copies, so nothing you
+picked changes; if a tier's footprint moves by more than 5% at that resolution
+it keeps its step-4 outline and the status line says which.
+
+Below about 0.1 mm you are into diminishing returns: the outlines keep
+improving slightly but the cost climbs, and the remaining error is the scan's,
+not the raster's.
+
 "Save project" stores everything (orientation, regions, extras, parameters) in
 a JSON you can reload later or start from for the next scan of the same frame:
 `python app.py myframe.json`.

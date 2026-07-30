@@ -131,37 +131,62 @@ a.pick_base_at(-70, Z(10))
 assert not a._pick_base_armed
 print("picked base:", a.base_thickness, "y0:", a.base_y0)
 assert abs(a.base_thickness - 12) < 0.5
-assert abs(a.base_y0 + 0.5) < 0.2, "mid-plane offset should be about -0.5 mm"
+# the two bosses are different heights, so the Y bbox centre is not the
+# frame mid-plane and base_y0 has to absorb the difference
+assert abs(a.base_y0 - 0.22) < 0.2, "mid-plane offset should be about +0.2"
 
 # tiers: one view per side, and a click lands in whichever view you clicked
 a.tb_over.set_val("0.3")
 a.tb_grow.set_val("0")
 for side in ("left", "right"):
-    a._on_click(FakeClick(a.tier_axes[side], 25, Z(-30)))   # grip walls, +5
+    a._on_click(FakeClick(a.tier_axes[side], 30, Z(20)))    # grip walls, +5
     a._on_click(FakeClick(a.tier_axes[side], 0, Z(40)))     # rail,       +7
-a._on_click(FakeClick(a.tier_axes["right"], 5, Z(4)))       # boss, right only
-assert len(a.regions) == 5
-assert [t["side"] for t in a.regions].count("right") == 3
+a._on_click(FakeClick(a.tier_axes["right"], 5, Z(4)))       # boss,     +8 R
+a._on_click(FakeClick(a.tier_axes["right"], 24, Z(-35)))    # diagonal rib +6.5
+a._on_click(FakeClick(a.tier_axes["left"], 25, Z(15)))      # round boss +8 L
+assert len(a.regions) == 7
+assert [t["side"] for t in a.regions].count("right") == 4
 # a click in the left view can only ever make a left tier
 assert all(t["side"] == "left" for t in a.regions
-           if abs(t["x"] - 25) < 1 and t["side"] == "left")
+           if abs(t["x"] - 30) < 1 and t["side"] == "left")
 for t in a.regions:
     assert t["polys"], f"tier {t} came out empty"
 print("tiers:", [(t["side"], t["add_mm"], t["area_mm2"]) for t in a.regions])
 
 # tiers are kept in stacking order (side, then height), not click order
-assert [t["side"] for t in a.regions] == ["left", "left", "right",
-                                          "right", "right"]
+assert [t["side"] for t in a.regions] == ["left"] * 3 + ["right"] * 4
 adds = [t["add_mm"] for t in a.regions]
-assert adds == sorted(adds[:2]) + sorted(adds[2:])
+assert adds == sorted(adds[:3]) + sorted(adds[3:])
 for t in a.regions:
-    exp = {"left": [5.0, 7.0], "right": [5.0, 7.0, 8.0]}[t["side"]]
+    exp = {"left": [5.0, 7.0, 8.5], "right": [5.0, 6.5, 7.0, 8.0]}[t["side"]]
     assert min(abs(t["add_mm"] - e) for e in exp) < 0.4, t
+# the non-axis-aligned picks are there: a diagonal strip and a round island
+_rib = [t for t in a.regions if abs(t["add_mm"] - 6.5) < 0.4][0]
+_rnd = [t for t in a.regions
+        if t["side"] == "left" and abs(t["add_mm"] - 8.5) < 0.4][0]
+_rnd_isl = max((np.asarray(p) for p in _rnd["polys"]),
+               key=lambda p: -abs(core._poly_area(p) - np.pi * 16))
+print(f"  diagonal rib tier: {len(_rib['polys'])} islands; "
+      f"round boss island {len(_rnd_isl)} pts, "
+      f"area {core._poly_area(_rnd_isl):.1f} mm2 (true 50.3)")
+assert len(_rnd_isl) >= 10, "the round island got flattened"
 a.fig.savefig("gui_step4_tiers.png", dpi=100)
 
 # the tier stack must cover the whole scan
 cov = core.coverage_report(a.maps, a.regions, a.base_thickness, a.base_y0)
-print("coverage:", cov)
+print("coverage as picked:",
+      {k: (v["short_mm"], v["area_mm2"]) for k, v in cov.items()})
+if max(cov[s]["short_mm"] for s in ("left", "right")) > 0.4:
+    # the diagonal rib's end comes up a sliver short (a dropped triangle drags
+    # the surface under the threshold); `grow` is the designed remedy
+    a._select(a.regions.index(_rib))
+    a.tb_grow.set_val("0.5")
+    a._apply_edits()
+    a.tb_grow.set_val("0")
+    cov = core.coverage_report(a.maps, a.regions, a.base_thickness,
+                               a.base_y0)
+    print("coverage after growing the rib:",
+          {k: (v["short_mm"], v["area_mm2"]) for k, v in cov.items()})
 assert max(cov[s]["short_mm"] for s in ("left", "right")) < 0.4
 assert "cover the whole scan" in a._coverage_note()
 
@@ -178,35 +203,38 @@ assert lo > hi, "left view should have X inverted"
 assert a.tier_axes["right"].get_xlim()[0] < a.tier_axes["right"].get_xlim()[1]
 
 # selection: any tier, not just the last one
+_boss_i = max(range(len(a.regions)),
+              key=lambda i: (a.regions[i]["side"] == "right",
+                             a.regions[i]["add_mm"]))
 a._select(0)
 assert a.sel == 0 and a.tb_add.text == f"{a.regions[0]['add_mm']:g}"
 a._step_sel(+1)
 assert a.sel == 1
 # right-clicking a view selects the tallest tier there — and only that side's
-assert a._region_at(5, Z(4), "right") == 4, "boss tier should win over rail"
+assert a._region_at(5, Z(4), "right") == _boss_i, "boss tier should win"
 assert a._region_at(5, Z(4), "left") == 0, "left view sees only left tiers"
 assert a._region_at(-70, Z(10), "right") is None, "the tang is base, not a tier"
 # clicking a list row selects too
-a.lst.on_select(4)
-assert a.sel == 4
+a.lst.on_select(_boss_i)
+assert a.sel == _boss_i
 
 # editing is explicit: typing alone changes nothing until Apply
-before = a.regions[4]["area_mm2"]
+before = a.regions[_boss_i]["area_mm2"]
 a.tb_grow.set_val("2")
-assert a.regions[4]["area_mm2"] == before, "no re-cut before Apply"
+assert a.regions[_boss_i]["area_mm2"] == before, "no re-cut before Apply"
 a._apply_edits()
-assert a.regions[4]["area_mm2"] > before, "grow_mm must dilate the outline"
+assert a.regions[_boss_i]["area_mm2"] > before, "grow_mm must dilate the outline"
 a.tb_grow.set_val("0")
 a._apply_edits()
 a.tb_add.set_val("8.4")            # caliper override; outline must not move
-area = a.regions[4]["area_mm2"]
+area = a.regions[_boss_i]["area_mm2"]
 a._apply_edits()
-assert a.regions[4]["add_mm"] == 8.4
-assert abs(a.regions[4]["area_mm2"] - area) < 1e-9
+assert a.regions[_boss_i]["add_mm"] == 8.4
+assert abs(a.regions[_boss_i]["area_mm2"] - area) < 1e-9
 # Enter applies too, and applying twice is a no-op
 a.tb_add.set_val("8")
 a._on_key(type("E", (), {"key": "enter"})())
-assert a.regions[4]["add_mm"] == 8.0
+assert a.regions[_boss_i]["add_mm"] == 8.0
 a._apply_edits()
 assert "Nothing to apply" in a.txt_status.get_text()
 # the busy badge is up *while* the re-cut runs, and gone afterwards
@@ -246,18 +274,21 @@ print("widget interaction does no full redraws")
 a.tb_over.stop_typing()
 a.tb_over.set_val("0.3")
 
-# deleting a middle tier re-cuts the one above it (its threshold drops)
-a._select(3)                        # right rail tier
-rail_thr = a.regions[3]["threshold_mm"]
-boss_thr = a.regions[4]["threshold_mm"]
+# deleting a middle tier re-cuts the one above it (its threshold drops to the
+# tier that is now below it)
+_n0 = len(a.regions)
+_rail = [t for t in a.regions
+         if t["side"] == "right" and abs(t["add_mm"] - 7.0) < 0.3][0]
+_boss = a.regions[_boss_i]
+rail_thr, boss_thr = _rail["threshold_mm"], _boss["threshold_mm"]
+a._select(a.regions.index(_rail))
 a._on_region_del(None)
-assert len(a.regions) == 4
-boss = a.regions[-1]
-assert boss["side"] == "right" and abs(boss["add_mm"] - 8.0) < 0.4
-assert boss["threshold_mm"] < boss_thr, "boss should now cut from the tier below"
-assert abs(boss["threshold_mm"] - rail_thr) < 1e-6
+assert len(a.regions) == _n0 - 1
+assert _boss in a.regions and abs(_boss["add_mm"] - 8.0) < 0.4
+assert _boss["threshold_mm"] < boss_thr, "boss should cut from the tier below"
+assert abs(_boss["threshold_mm"] - rail_thr) < 1e-6
 a._on_click(FakeClick(a.tier_axes["right"], 0, Z(40)))   # put the rail back
-assert len(a.regions) == 5
+assert len(a.regions) == _n0
 
 # base thickness / y0 also wait for Apply
 a.tb_base.set_val("12.5")
@@ -287,12 +318,27 @@ assert os.path.isdir(cad)
 want = ["00_base.dxf", "all_sketches.dxf", "build.txt", "assembly.scad"]
 assert all(os.path.isfile(os.path.join(cad, f) )for f in want), os.listdir(cad)
 dxfs = [f for f in os.listdir(cad) if f.endswith(".dxf")]
-assert len(dxfs) == 1 + 5 + 2 + 1, dxfs      # base + tiers + extras + combined
+assert len(dxfs) == 1 + 7 + 2 + 1, dxfs      # base + tiers + extras + combined
 sheet = open(os.path.join(cad, "build.txt"), encoding="utf-8").read()
 assert "R3_plus" in sheet and "clearance     : 0.15" in sheet
+# the export re-cuts the tiers on a finer raster than step 4 works at, on
+# copies, so the interactive state is untouched
+_before = [(t["area_mm2"], len(t["polys"])) for t in a.regions]
+a.tb_epx.set_val("0.2")
+_fine, _note = a._refined_regions()
+assert "0.2 mm/px" in _note, _note
+assert [(t["area_mm2"], len(t["polys"])) for t in a.regions] == _before, \
+    "refining for export must not disturb the tiers you are editing"
+for _o, _n in zip(a.regions, _fine):
+    assert _n is not _o
+    assert abs(_n["area_mm2"] - _o["area_mm2"]) < 0.06 * _o["area_mm2"]
+a.tb_epx.set_val("1.0")          # coarser than the map: no re-cut at all
+assert a._refined_regions()[1] == ""
+a.tb_epx.set_val("0.2")
+print("export re-cut OK")
 print("CAD export OK:", sorted(os.listdir(cad)))
 # the export step previews every sketch it is about to write
-assert a.model is not None and len(a.model) == 1 + 5 + 2
+assert a.model is not None and len(a.model) == 1 + 7 + 2
 a.fig.savefig("gui_step6_export.png", dpi=100)
 
 # --- project save/load round trip
@@ -301,7 +347,7 @@ a._on_proj_save(None)
 b = appmod.App()
 b.tb_proj.set_val("test_project.json")
 b._on_proj_load(None)
-assert len(b.regions) == 5 and len(b.extras) == 2
+assert len(b.regions) == 7 and len(b.extras) == 2
 assert abs(b.base_y0 - a.base_y0) < 1e-9
 assert all(t.get("polys") for t in b.regions), "outlines must survive the JSON"
 assert b.orig_verts is not None
