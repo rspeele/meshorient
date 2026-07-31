@@ -9,9 +9,9 @@ The "side view" is the XZ plane, looking along +Y. All units are mm.
 Pipeline:
     scan mesh -> orient -> side-view silhouette (outer contour only, windows
     filled) -> two-sided surface maps (where the scan's left and right faces
-    sit, per side-view pixel) -> thickness tiers -> extras (screw holes,
-    magazine path, ...) -> sketch_model() + export_cad() -> one DXF per
-    sketch plus the extrusion depths, which is the model exactly.
+    sit, per side-view pixel) -> thickness tiers -> sketch_model() +
+    export_cad() -> one DXF per sketch plus the extrusion depths, which is
+    the model exactly.
 
 The output is CAD, not mesh: the tier model is a sketch-and-extrude model,
 so it goes out losslessly as 2D outlines. Downstream, OpenSCAD turns
@@ -1128,18 +1128,7 @@ def _grow_loops(loops, mm, simplify_mm=0.1):
     return out
 
 
-def _box_loop(e, pad=0.0):
-    """The four corners of a box extra, in world XZ."""
-    cx, cz = (e["x0"] + e["x1"]) / 2, (e["z0"] + e["z1"]) / 2
-    hx = abs(e["x1"] - e["x0"]) / 2 + pad
-    hz = abs(e["z1"] - e["z0"]) / 2 + pad
-    a = np.deg2rad(e.get("tilt_deg", 0.0))
-    c, s = np.cos(a), np.sin(a)
-    p = np.array([[-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]])
-    return p @ np.array([[c, -s], [s, c]]).T + [cx, cz]
-
-
-def sketch_model(sil: Silhouette, base_thickness, regions, extras,
+def sketch_model(sil: Silhouette, base_thickness, regions,
                  base_y0=0.0, clearance=0.0, circle_tol=0.0):
     """The solid as a list of sketches with extrusion ranges.
 
@@ -1198,22 +1187,6 @@ def sketch_model(sil: Silhouette, base_thickness, regions, extras,
             "loops": loops, "circles": circles,
             "y_lo": y_lo, "y_hi": y_hi})
 
-    for i, e in enumerate(extras, 1):
-        yc = e.get("yc", 0.0)
-        if e["kind"] == "box":
-            hw = e["ywidth"] / 2 + c
-            model.append({"key": f"X{i}_box", "kind": "extra",
-                          "label": f"extra {i} - box, tilt "
-                                   f"{e.get('tilt_deg', 0.0):g} deg",
-                          "loops": [_box_loop(e, c)], "circles": [],
-                          "y_lo": yc - hw, "y_hi": yc + hw})
-        elif e["kind"] == "cyl_y":
-            hw = e["ylen"] / 2 + c
-            model.append({"key": f"X{i}_cyl", "kind": "extra",
-                          "label": f"extra {i} - cylinder dia {e['dia']:g} mm",
-                          "circles": [(e["x"], e["z"],
-                                       e["dia"] / 2 + c)],
-                          "loops": [], "y_lo": yc - hw, "y_hi": yc + hw})
     return model
 
 

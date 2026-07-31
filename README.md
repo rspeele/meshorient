@@ -1,13 +1,25 @@
 # frame2solid
 
-Turns a 3D scan of a pistol frame into a clean, watertight **subtraction
-solid** — the thing you boolean-subtract from a donor grip exterior to make a
-transplanted grip. Fills magwell windows and pin holes automatically, rebuilds
-the frame as a stack of flat **thickness tiers, independently per side** (so a
-trigger-bar relief on the right doesn't fatten the left), lets you add
-clearance solids (magazine path, grip screws, levers), applies a fit-clearance
-offset, and exports the result as CAD: one DXF per sketch plus the extrusion
-table and a ready-to-run OpenSCAD assembly.
+Two things, for a grip-transplant project:
+
+1. **Get a raw frame scan square.** Load it, PCA-orient it, then level it off
+   three clicks on a face you know is flat, and write it back out with the
+   orientation baked in — a rigid transform, nothing resampled. This is the
+   fiddly part of any scan-to-CAD job, and everything downstream (Blender
+   booleans, MeshMixer registration, CNC) is easier on a datum that means
+   something. Steps 1–2, and for a lot of work that is the whole of it.
+2. **Rebuild the frame as a clean subtraction solid** — the thing you
+   boolean-subtract from a donor grip exterior. Fills magwell windows and pin
+   holes automatically, quantises the frame into a stack of flat **thickness
+   tiers, independently per side** (so a trigger-bar relief on the right
+   doesn't fatten the left), applies a fit-clearance offset, and exports the
+   result as CAD: one DXF per sketch plus the extrusion table and a
+   ready-to-run OpenSCAD assembly. Steps 3–5, and the DXFs are what SolveSpace
+   and VCarve want.
+
+If your scan is already watertight and you are comfortable in Blender, (1) plus
+cubes in Blender may well be all you need; (2) earns its keep when you want
+real profiles to machine or edit rather than a mesh.
 
 ## Install (Windows)
 
@@ -36,7 +48,7 @@ The side view (X-Z) is what becomes the outline. If you've already aligned the
 scan in MeshMixer/Blender, export it that way and skip PCA; otherwise
 "Auto-orient (PCA)" plus the 90° buttons gets you there in a few clicks.
 
-## The six steps
+## The five steps
 
 **1 · Load/Orient.** Load STL/OBJ/PLY. Three projection views update as you
 rotate. You're done when the SIDE view shows the classic frame profile, the
@@ -123,21 +135,11 @@ Thickness always rounds **up**: a feature only 0.5 mm proud of a tier gets
 pulled up to the next one. Too thick only costs grip wall thickness, too thin
 means the grip fouls the frame.
 
-**5 · Extras.** Clearance solids beyond the frame itself, in the same
-coordinates. **Drag** to add a box (set its across-width, tilt and `y-mid`
-first — e.g. a magazine insertion path angled with the grip, drawn from above
-the magwell down past where any grip could reach). **Click** to add a Y-axis
-cylinder (grip screw holes, pin punches — set diameter/length first). `y-mid`
-offsets an extra off the centreline, for reliefs that belong on one side only.
-The text boxes edit the **last** extra added. Everything here gets unioned
-with the frame before subtraction, so nothing you build later can block a
-magazine or bury a screw.
-
-**6 · Export.** The tier model *is* a sketch-and-extrude model, so it goes
+**5 · Export.** The tier model *is* a sketch-and-extrude model, so it goes
 out losslessly as CAD. The view lists every sketch and its Y range — a last
 look at what's about to be written. **EXPORT CAD** writes `<name>_cad/`:
 
-- one DXF per sketch (base outline, each tier, each extra),
+- one DXF per sketch (base outline, each tier),
 - `all_sketches.dxf`, one layer per sketch, if you'd rather import once,
 - `build.txt` — the build sheet, with the exact Y range and depth per sketch,
 - `assembly.scad` — the whole model rebuilt in OpenSCAD, with the
@@ -162,7 +164,7 @@ lists every circle's centre and diameter — handy for checking a hole came out
 the size you expected. The number is how far a loop may stray from a circle
 and still count, so about one `export px`; 0 turns the whole thing off and
 everything goes out as polygons. Only tier islands are tested — the base
-outline is left alone, and cylinder extras were always real circles.
+outline is left alone.
 
 `export px` re-measures the scan and re-cuts the tiers at a finer raster than
 step 4 works at — step 4 stays at `map px` (0.5 mm) to keep clicking
@@ -178,9 +180,10 @@ Below about 0.1 mm you are into diminishing returns: the outlines keep
 improving slightly but the cost climbs, and the remaining error is the scan's,
 not the raster's.
 
-"Save project" stores everything (orientation, regions, extras, parameters) in
-a JSON you can reload later or start from for the next scan of the same frame:
-`python app.py myframe.json`.
+"Save project" stores everything (orientation, tiers, parameters) in a JSON
+you can reload later or start from for the next scan of the same frame:
+`python app.py myframe.json`. Projects saved before the Extras step was
+removed still load; their extras are dropped and the status line says so.
 
 ## Using the output
 
@@ -208,10 +211,14 @@ test-fit before cutting wood; edit one number and rebuild.
   sides are independent (the solid is not symmetric about Y=0). Edge rounds
   and chamfers on the real frame become steps — a superset of the frame,
   which for a subtraction solid just means harmless extra internal clearance.
-  Genuinely non-2.5D features (angled dovetails, tapered magwell mouths) —
-  cover them with an oversized box/cylinder extra.
+  Genuinely non-2.5D features (angled dovetails, tapered magwell mouths) are
+  a cube in Blender, subtracted from the donor grip alongside this solid.
 - A tier's outline is clipped to the silhouette, so `grow` cannot push it
-  past the frame profile; use an extra where the frame exits the grip.
+  past the frame profile. Where the frame exits the grip, extend it in
+  Blender.
+- There used to be an **Extras** step — tilted boxes for the magazine path,
+  Y-cylinders for grip screws, unioned into the solid. It is gone. Boxes in
+  Blender do that job better and there is no reason to draw them here.
 - Thicknesses are measured from the scan but noisy; override with caliper
   numbers. The outline a tier covers never depends on that override.
 - The silhouette keeps only the largest outer contour: crop turntable junk and

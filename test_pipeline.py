@@ -436,18 +436,12 @@ print("coverage without the boss tier:", short)
 assert 0.8 < short["short_mm"] < 1.3
 regions = tiers
 
-extras = [
-    {"kind": "cyl_y", "x": 55, "z": -20, "dia": 5.0, "ylen": 40.0},   # grip screw
-    {"kind": "box", "x0": -25, "z0": -95, "x1": 15, "z1": -20,
-     "ywidth": 20.0, "tilt_deg": 8.0},                                # mag path
-]
-
 # ---- CAD: the model as sketches + extrusion depths, which IS the output
 CLEAR = 0.15
 CFIT = 0.3
-model = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+model = core.sketch_model(sil, base, regions, base_y0=base_y0,
                           clearance=CLEAR, circle_tol=CFIT)
-assert len(model) == 1 + len(tiers) + len(extras)
+assert len(model) == 1 + len(tiers)
 print("sketch model:")
 for s in model:
     print(f"  {s['key']:<24} y {s['y_lo']:+7.2f} .. {s['y_hi']:+7.2f}  "
@@ -475,7 +469,7 @@ assert np.hypot(_cx - 25, _cz - 15) < 0.25, (_cx, _cz)
 # r = true + the raster's conservative half pixel + clearance, and never under
 assert 4.0 + CLEAR <= _cr < 4.0 + CLEAR + 0.6, _cr
 # clearance goes on the radius analytically, not by re-rasterising the disc
-_nom = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+_nom = core.sketch_model(sil, base, regions, base_y0=base_y0,
                          clearance=0.0, circle_tol=CFIT)
 _nr = [s for s in _nom if s.get("side") == "left" and s["circles"]][-1]
 assert abs((_cr - _nr["circles"][0][2]) - CLEAR) < 1e-9, "clearance is r + c"
@@ -485,7 +479,7 @@ assert abs(np.pi * _nr["circles"][0][2] ** 2
            - core._poly_area(_poly_rb)) < 1e-6, "footprint must be preserved"
 # and it is opt-out: circle_tol = 0 leaves everything a polygon
 assert not any(s["circles"] for s in
-               core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+               core.sketch_model(sil, base, regions, base_y0=base_y0,
                                  clearance=CLEAR, circle_tol=0.0)
                if s["kind"] == "tier")
 # the detector must not turn angular features into circles
@@ -513,7 +507,7 @@ boss_sk = max((s for s in model if s.get("side") == "right"),
               key=lambda s: s["y_hi"])          # the tallest right tier
 assert abs(boss_sk["y_hi"] - (14.0 + CLEAR)) < 0.4, boss_sk["y_hi"]
 # the clearance-grown outline must enclose the nominal one
-nominal = core.sketch_model(sil, base, regions, extras, base_y0=base_y0,
+nominal = core.sketch_model(sil, base, regions, base_y0=base_y0,
                             clearance=0.0)
 n_boss = max((s for s in nominal if s.get("side") == "right"),
              key=lambda s: s["y_hi"])
@@ -607,8 +601,8 @@ ax.set_title(f"4. RIGHT-side tier stack (base {base:.1f} mm)")
 
 ax = axes[1, 1]
 for sk in model:
-    c = {"base": "0.4", "left": "tab:blue", "right": "tab:red",
-         "extra": "tab:green"}.get(sk.get("side", sk["kind"]), "tab:orange")
+    c = {"base": "0.4", "left": "tab:blue",
+         "right": "tab:red"}.get(sk.get("side", sk["kind"]), "tab:orange")
     for loop in sk["loops"]:
         ax.add_patch(plt.Polygon(np.asarray(loop), closed=True, fill=False,
                                  ec=c, lw=1.4))

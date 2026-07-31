@@ -28,11 +28,7 @@ Steps (radio buttons, top right):
                   listed at the right: click a row (or right-click a view) to
                   select one; edit its height / noise margin / growth in the
                   boxes and press APPLY (or Enter) to commit.
-  5 Extras      — add clearance solids: drag = tilted box (mag path, levers),
-                  click = Y-cylinder (grip screws, pins). Dims via text boxes
-                  (they edit the LAST extra); y-mid offsets it off the
-                  centreline for one-sided reliefs.
-  6 Export      — write the model out: one DXF per sketch plus the
+  5 Export      — write the model out: one DXF per sketch plus the
                   extrusion table and an OpenSCAD assembly. The view shows
                   every outline that will be written and its Y range.
                   Downstream, OpenSCAD makes the STL (or the finished grip)
@@ -49,8 +45,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MplPath
-from matplotlib.widgets import (Button, TextBox, RadioButtons,
-                                RectangleSelector)
+from matplotlib.widgets import Button, TextBox, RadioButtons
 from matplotlib.patches import Polygon as MplPolygon, Circle as MplCircle
 
 import core
@@ -143,9 +138,8 @@ def _patch_matplotlib_textbox():
 
 _patch_matplotlib_textbox()
 
-STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Extras",
-         "6 Export"]
-S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXTRAS, S_EXPORT = range(len(STEPS))
+STEPS = ["1 Load/Orient", "2 Level", "3 Silhouette", "4 Tiers", "5 Export"]
+S_LOAD, S_LEVEL, S_SIL, S_TIERS, S_EXPORT = range(len(STEPS))
 
 
 def step_ref(i):
@@ -300,10 +294,8 @@ class App:
         self.base_y0 = 0.0            # mid-plane of the base slab
         self.regions = []
         self.sel = None               # index of the selected region
-        self.extras = []
         self.model = None             # cached sketch model for export
         self.step = 0
-        self.extra_kind = "box (drag)"
         self._radio_guard = False
         self._sync = False            # suppress widget callbacks while syncing
         self._pick_base_armed = False
@@ -481,61 +473,27 @@ class App:
         self.w3.append(self.lst)
 
         self._wy = 0.745
-        # ---------- step 5 widgets (Extras)
-        self.w4 = self.w_extra = []
-        r = slot(h=0.075)
-        ax4 = self.fig.add_axes(r)
-        self.radio_extra = RadioButtons(ax4, ["box (drag)", "cyl-Y (click)"],
-                                        active=0)
-        self.radio_extra.on_clicked(self._on_extra_kind)
-        self.w4.append(self.radio_extra)
-        r = slot(split=(0.67, 0.085))
-        self.tb_yw = TextBox(self.fig.add_axes(r), "y-width ", initial="20")
-        self.tb_tilt = TextBox(self.fig.add_axes([0.80, r[1], 0.06, r[3]]),
-                               "tilt° ", initial="0")
-        self.tb_dia = TextBox(self.fig.add_axes([0.92, r[1], 0.055, r[3]]),
-                              "dia ", initial="5")
-        self.tb_yw.on_submit(self._on_extra_edit)
-        self.tb_tilt.on_submit(self._on_extra_edit)
-        self.tb_dia.on_submit(self._on_extra_edit)
-        self.w4 += [self.tb_yw, self.tb_tilt, self.tb_dia]
-        r = slot(split=(0.67, 0.10))
-        self.tb_ylen = TextBox(self.fig.add_axes(r), "cyl len ", initial="60")
-        self.tb_ylen.on_submit(self._on_extra_edit)
-        self.tb_yc = TextBox(self.fig.add_axes([0.845, r[1], 0.055, r[3]]),
-                             "y-mid ", initial="0")
-        self.tb_yc.on_submit(self._on_extra_edit)
-        self.w4 += [self.tb_ylen, self.tb_yc]
-        r = slot(split=(0.67, 0.145))
-        self.bt_edel = Button(self.fig.add_axes(r), "Delete last extra")
-        self.bt_edel.on_clicked(self._on_extra_del)
-        self.bt_eclr = Button(self.fig.add_axes([0.835, r[1], 0.145, r[3]]),
-                              "Clear extras")
-        self.bt_eclr.on_clicked(self._on_extra_clr)
-        self.w4 += [self.bt_edel, self.bt_eclr]
-
-        self._wy = 0.745
-        # ---------- step 6 widgets (Export)
-        self.w5 = self.w_export = []
+        # ---------- step 5 widgets (Export)
+        self.w4 = self.w_export = []
         r = slot(split=(0.78, 0.10))
         self.tb_clr = TextBox(self.fig.add_axes(r), "clearance mm ",
                               initial="0.15")
-        self.w5.append(self.tb_clr)
+        self.w4.append(self.tb_clr)
         r = slot(split=(0.78, 0.10))
         self.tb_epx = TextBox(self.fig.add_axes(r), "export px ", initial="0.2")
-        self.w5.append(self.tb_epx)
+        self.w4.append(self.tb_epx)
         r = slot(split=(0.78, 0.10))
         self.tb_cfit = TextBox(self.fig.add_axes(r), "circle fit mm ",
                                initial="0.3")
-        self.w5.append(self.tb_cfit)
+        self.w4.append(self.tb_cfit)
         r = slot()
         self.tb_out = TextBox(self.fig.add_axes(r), "name ",
                               initial="frame_solid")
-        self.w5.append(self.tb_out)
+        self.w4.append(self.tb_out)
         r = slot(h=0.06)
         self.bt_cad = Button(self.fig.add_axes(r), "EXPORT CAD (DXF + SCAD)")
         self.bt_cad.on_clicked(self._on_export_cad)
-        self.w5.append(self.bt_cad)
+        self.w4.append(self.bt_cad)
 
         # ---------- always-visible project row
         self.tb_proj = TextBox(self.fig.add_axes([0.67, 0.075, 0.31, 0.045]),
@@ -548,14 +506,9 @@ class App:
         self.bt_pload.on_clicked(self._on_proj_load)
 
         self._groups = [self.w_load, self.w_level, self.w_sil, self.w_tier,
-                        self.w_extra, self.w_export]
+                        self.w_export]
 
-        # ---------- selectors / events
-        self.rsel = RectangleSelector(self.ax_main, self._on_rect,
-                                      useblit=False, button=[1],
-                                      interactive=False, minspanx=1,
-                                      minspany=1, spancoords="data")
-        self.rsel.set_active(False)
+        # ---------- events
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
 
@@ -609,7 +562,6 @@ class App:
         for ax in self.tier_axes.values():
             ax.set_visible(show_tiers)
         self.ax_main.set_visible(not show_orient and not show_tiers)
-        self.rsel.set_active(i == S_EXTRAS)   # drag-a-box is Extras only
         self._pick_base_armed = False
         if show_tiers:
             if self.sil is not None and self.maps is None:
@@ -1140,84 +1092,7 @@ class App:
         self.model = None
         self._select(None)
 
-    # ================================================== step 5: extras
-    def _on_extra_kind(self, label):
-        self.extra_kind = label
-
-    def _extra_yc(self):
-        try:
-            return float(self.tb_yc.text)
-        except ValueError:
-            return 0.0
-
-    def add_extra_box(self, x0, z0, x1, z1):
-        try:
-            yw = float(self.tb_yw.text)
-            tilt = float(self.tb_tilt.text)
-        except ValueError:
-            yw, tilt = 20.0, 0.0
-        yc = self._extra_yc()
-        self.extras.append({"kind": "box", "x0": round(x0, 2),
-                            "z0": round(z0, 2), "x1": round(x1, 2),
-                            "z1": round(z1, 2), "ywidth": yw,
-                            "tilt_deg": tilt, "yc": yc})
-        self.model = None
-        self._status(f"Extra {len(self.extras)}: box, y {yc:+g} ± {yw / 2:g}, "
-                     f"tilt {tilt}°. Edit via text boxes (applies to last).")
-        self._draw()
-
-    def add_extra_cyl(self, x, z):
-        try:
-            dia = float(self.tb_dia.text)
-            ylen = float(self.tb_ylen.text)
-        except ValueError:
-            dia, ylen = 5.0, 60.0
-        yc = self._extra_yc()
-        self.extras.append({"kind": "cyl_y", "x": round(x, 2),
-                            "z": round(z, 2), "dia": dia, "ylen": ylen,
-                            "yc": yc})
-        self.model = None
-        self._status(f"Extra {len(self.extras)}: Y-cylinder ⌀{dia} × {ylen} "
-                     f"centred at y {yc:+g}.")
-        self._draw()
-
-    def _on_extra_edit(self, _text):
-        if not self.extras:
-            return
-        e = self.extras[-1]
-        try:
-            e["yc"] = float(self.tb_yc.text)
-            if e["kind"] == "box":
-                e["ywidth"] = float(self.tb_yw.text)
-                e["tilt_deg"] = float(self.tb_tilt.text)
-            else:
-                e["dia"] = float(self.tb_dia.text)
-                e["ylen"] = float(self.tb_ylen.text)
-            self.model = None
-            self._draw()
-        except ValueError:
-            pass
-
-    def _on_extra_del(self, _):
-        if self.extras:
-            self.extras.pop()
-            self.model = None
-            self._draw()
-
-    def _on_extra_clr(self, _):
-        self.extras = []
-        self.model = None
-        self._draw()
-
-    # ================================================== selectors
-    def _on_rect(self, eclick, erelease):
-        x0, z0 = eclick.xdata, eclick.ydata
-        x1, z1 = erelease.xdata, erelease.ydata
-        if None in (x0, z0, x1, z1):
-            return
-        if self.step == S_EXTRAS and self.extra_kind.startswith("box"):
-            self.add_extra_box(x0, z0, x1, z1)
-
+    # ================================================== clicks
     def _toolbar_idle(self):
         tb = self.fig.canvas.toolbar
         return tb is None or getattr(tb, "mode", "") == ""
@@ -1244,11 +1119,8 @@ class App:
                     self.pick_base_at(x, z)
                 else:
                     self.add_region(x, z, side)
-        elif (self.step == S_EXTRAS and event.inaxes is self.ax_main
-                and event.button == 1 and self.extra_kind.startswith("cyl")):
-            self.add_extra_cyl(x, z)
 
-    # ================================================== step 6: export
+    # ================================================== step 5: export
     def _sketch_model(self, regions=None):
         """The model as sketches + extrusion depths (cached for the preview)."""
         if regions is None and self.model is not None:
@@ -1265,7 +1137,7 @@ class App:
             cfit = 0.0
         model = core.sketch_model(
             self.sil, self.base_thickness,
-            self.regions if regions is None else regions, self.extras,
+            self.regions if regions is None else regions,
             base_y0=self.base_y0, clearance=clr, circle_tol=cfit)
         self.model = model
         return model
@@ -1361,7 +1233,7 @@ class App:
              "base_y0": self.base_y0,
              "level_pts": [list(map(float, p)) for p in self.level_pts],
              "map_px": self.tb_mpx.text,
-             "regions": self.regions, "extras": self.extras,
+             "regions": self.regions,
              "export": {"clearance": self.tb_clr.text,
                         "export_px": self.tb_epx.text,
                         "circle_fit": self.tb_cfit.text,
@@ -1392,7 +1264,14 @@ class App:
         self.base_y0 = float(d.get("base_y0", 0.0))
         self.level_pts = [list(p) for p in d.get("level_pts", [])]
         self.regions = d.get("regions", [])
-        self.extras = d.get("extras", [])
+        # Extras (boxes/cylinders for the magazine path and grip screws) were
+        # dropped: that job is done in Blender now. Old projects still load —
+        # their extras are simply not part of the model any more, and saying
+        # so beats silently exporting a solid that is missing them.
+        n_extras = len(d.get("extras") or [])
+        dropped = (f" {n_extras} extra(s) in this project were ignored — "
+                   f"extras are gone; add those clearances in Blender."
+                   if n_extras else "")
         self.sel = len(self.regions) - 1 if self.regions else None
         self._sync_boxes()
         self._refresh_list()
@@ -1409,9 +1288,10 @@ class App:
             self.maps = None
             self.model = None
             self._status(f"Project loaded; scan reloaded ({len(v)} verts). "
-                         f"Re-run {step_ref(S_SIL)} to continue.")
+                         f"Re-run {step_ref(S_SIL)} to continue.{dropped}")
         else:
-            self._status("Project loaded (scan file not found — load manually).")
+            self._status("Project loaded (scan file not found — load "
+                         "manually)." + dropped)
         self._draw()
 
     # ================================================== drawing
@@ -1497,40 +1377,11 @@ class App:
                 ax.set_title("Press 'Extract silhouette'")
             ax.set_aspect("equal")
 
-        elif self.step == S_EXTRAS:    # extras
-            if self.sil is not None:
-                ex = self.sil.world_extent()
-                ax.imshow(self.sil.mask, origin="lower", extent=ex,
-                          cmap="gray_r", alpha=0.35)
-            self._draw_regions(ax, faint=True)
-            for i, e in enumerate(self.extras):
-                if e["kind"] == "box":
-                    cx, cz = (e["x0"] + e["x1"]) / 2, (e["z0"] + e["z1"]) / 2
-                    hx, hz = abs(e["x1"] - e["x0"]) / 2, abs(e["z1"] - e["z0"]) / 2
-                    a = np.deg2rad(e.get("tilt_deg", 0))
-                    c, s = np.cos(a), np.sin(a)
-                    pts = np.array([[-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]])
-                    rot = pts @ np.array([[c, -s], [s, c]]).T + [cx, cz]
-                    ax.add_patch(MplPolygon(rot, closed=True, fill=False,
-                                            ec="tab:red", lw=2))
-                    yc = e.get("yc", 0.0)
-                    ax.text(cx, cz, f"#{i+1} y{yc:+g}±{e['ywidth']/2:.0f}",
-                            color="tab:red", fontsize=8, ha="center")
-                else:
-                    ax.add_patch(MplCircle((e["x"], e["z"]), e["dia"] / 2,
-                                           fill=False, ec="tab:blue", lw=2))
-                    ax.text(e["x"], e["z"] + e["dia"] / 2 + 1,
-                            f"#{i+1} ⌀{e['dia']}", color="tab:blue",
-                            fontsize=8, ha="center")
-            ax.set_title("Extras: drag = box, click = Y-cylinder "
-                         "(kind set at right; y-mid offsets it off centre)")
-            ax.set_aspect("equal")
-
         elif self.step == S_EXPORT:
             model = self._sketch_model()
             if model:
                 colours = {"base": "0.35", "left": "tab:blue",
-                           "right": "tab:red", "extra": "tab:green"}
+                           "right": "tab:red"}
                 for i, s in enumerate(model):
                     c = colours.get(s.get("side", s["kind"]), "tab:orange")
                     for loop in s["loops"]:
@@ -1551,7 +1402,7 @@ class App:
                 ax.set_title(f"{len(model)} sketches to export — every outline "
                              f"and its extrusion range in Y\n"
                              f"grey = base · blue = left tiers · red = right "
-                             f"tiers · green = extras", fontsize=9)
+                             f"tiers", fontsize=9)
                 ax.set_xlabel("X mm"); ax.set_ylabel("Z mm")
             else:
                 ax.set_title("Set a base thickness and some tiers first")
@@ -1649,23 +1500,21 @@ class App:
                 # mirrored: this is the view standing on the frame's left
                 ax.invert_xaxis()
 
-    def _draw_regions(self, ax, side=None, faint=False):
+    def _draw_regions(self, ax, side=None):
         colors = ["tab:orange", "tab:red", "tab:cyan", "tab:purple",
                   "tab:brown", "tab:pink", "yellow", "lime"]
-        alpha = 0.5 if faint else 1.0
         shown = 0
         for i, r in enumerate(self.regions):
             if side is not None and r.get("side", side) != side:
                 continue
             c = colors[i % len(colors)]
-            sel = (not faint) and i == self.sel
+            sel = i == self.sel
             lw = 3.0 if sel else 1.8
             if core.region_kind(r) == "rect":
                 x0, x1 = min(r["x0"], r["x1"]), max(r["x0"], r["x1"])
                 z0, z1 = min(r["z0"], r["z1"]), max(r["z0"], r["z1"])
                 ax.add_patch(plt.Rectangle((x0, z0), x1 - x0, z1 - z0,
-                                           fill=False, ec=c, lw=lw,
-                                           alpha=alpha))
+                                           fill=False, ec=c, lw=lw))
                 lx, lz = x0 + 1, z0 + 1
                 label = f"#{i+1}: {r['width']}mm"
             else:
@@ -1678,18 +1527,16 @@ class App:
                         ax.add_patch(MplPolygon(p, closed=True, fc=c,
                                                 ec="none", alpha=0.25))
                     ax.add_patch(MplPolygon(p, closed=True, fill=False, ec=c,
-                                            lw=lw, alpha=alpha))
-                ax.plot([r["x"]], [r["z"]], "+", color=c, ms=9, mew=2,
-                        alpha=alpha)
+                                            lw=lw))
+                ax.plot([r["x"]], [r["z"]], "+", color=c, ms=9, mew=2)
                 # label at the pick point, stepped so tiers picked in the
                 # same place don't write on top of each other
                 lx, lz = r["x"] + 1.5, r["z"] + 1.5 + 3.5 * shown
                 label = (f"#{i+1} {SIDE_TAG[r['side']].strip()} "
                          f"+{r['add_mm']:g}mm")
             shown += 1
-            if not faint:
-                ax.text(lx, lz, label, color=c, fontsize=8,
-                        weight="bold" if sel else "normal")
+            ax.text(lx, lz, label, color=c, fontsize=8,
+                    weight="bold" if sel else "normal")
 
 
 def main():

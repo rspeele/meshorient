@@ -299,16 +299,7 @@ a.tb_base.set_val(f"{12.09:g}")
 a._apply_edits()
 a.fig.savefig("gui_step4_tiers.png", dpi=100)
 
-# --- step 5: extras
-a._set_step(appmod.S_EXTRAS)
-a.tb_yw.set_val("20"); a.tb_tilt.set_val("8"); a.tb_yc.set_val("0")
-a.add_extra_box(-25, zmin - 35, 15, zmax - 75)
-a.tb_dia.set_val("5"); a.tb_ylen.set_val("40")
-a.add_extra_cyl(55, zmax - 75)
-assert a.extras[-1]["yc"] == 0.0
-a.fig.savefig("gui_step5_extras.png", dpi=100)
-
-# --- step 6: CAD export — the tool's actual output
+# --- step 5: CAD export — the tool's actual output
 a._set_step(appmod.S_EXPORT)
 a.tb_clr.set_val("0.15")
 a.tb_out.set_val("gui_frame_solid")
@@ -318,7 +309,7 @@ assert os.path.isdir(cad)
 want = ["00_base.dxf", "all_sketches.dxf", "build.txt", "assembly.scad"]
 assert all(os.path.isfile(os.path.join(cad, f) )for f in want), os.listdir(cad)
 dxfs = [f for f in os.listdir(cad) if f.endswith(".dxf")]
-assert len(dxfs) == 1 + 7 + 2 + 1, dxfs      # base + tiers + extras + combined
+assert len(dxfs) == 1 + 7 + 1, dxfs          # base + tiers + combined
 sheet = open(os.path.join(cad, "build.txt"), encoding="utf-8").read()
 assert "R3_plus" in sheet and "clearance     : 0.15" in sheet
 # the export re-cuts the tiers on a finer raster than step 4 works at, on
@@ -365,11 +356,10 @@ _with = _dxf_circles(cad)
 a.tb_cfit.set_val("0")
 a._on_export_cad(None)
 _without = _dxf_circles(cad)
-print(f"circle fit: {_with} CIRCLE entities on, {_without} off "
-      f"(the cylinder extra is always one)")
-# the round boss appears in its own tier and the one below, plus the cyl extra
-assert _with == 3, _with
-assert _without == 1, "circle fit 0 must leave only the cylinder extra"
+print(f"circle fit: {_with} CIRCLE entities on, {_without} off")
+# the round boss appears in its own tier and in the one below it
+assert _with == 2, _with
+assert _without == 0, "circle fit 0 must leave nothing but polygons"
 
 def _sheet_circles(folder):
     """The build sheet's circle table, one row per exported CIRCLE."""
@@ -380,20 +370,19 @@ def _sheet_circles(folder):
             if " centre (" in ln]
 
 
-# the cylinder extra is always a circle, so the table is there either way —
-# what the box changes is whether the tiers' round islands join it
-assert len(_sheet_circles(cad)) == _without == 1, _sheet_circles(cad)
+# with the box off there are no circles at all, so no table either
+assert len(_sheet_circles(cad)) == _without == 0, _sheet_circles(cad)
 a.tb_cfit.set_val("0.3")
 a._on_export_cad(None)
 _rows = _sheet_circles(cad)
-assert len(_rows) == _with == 3, _rows
+assert len(_rows) == _with == 2, _rows
 assert all("dia" in ln for ln in _rows)
 assert "round island(s) are true CIRCLE entities" in open(
     os.path.join(cad, "build.txt"), encoding="utf-8").read()
 print("CAD export OK:", sorted(os.listdir(cad)))
 # the export step previews every sketch it is about to write
-assert a.model is not None and len(a.model) == 1 + 7 + 2
-a.fig.savefig("gui_step6_export.png", dpi=100)
+assert a.model is not None and len(a.model) == 1 + 7
+a.fig.savefig("gui_step5_export.png", dpi=100)
 
 # --- project save/load round trip
 a.tb_proj.set_val("test_project.json")
@@ -401,7 +390,7 @@ a._on_proj_save(None)
 b = appmod.App()
 b.tb_proj.set_val("test_project.json")
 b._on_proj_load(None)
-assert len(b.regions) == 7 and len(b.extras) == 2
+assert len(b.regions) == 7
 assert abs(b.base_y0 - a.base_y0) < 1e-9
 assert all(t.get("polys") for t in b.regions), "outlines must survive the JSON"
 assert b.orig_verts is not None
@@ -420,6 +409,10 @@ legacy.tb_proj.set_val("sample_project.json")
 legacy._on_proj_load(None)
 assert legacy.base_thickness and legacy.regions
 assert core.region_kind(legacy.regions[0]) == "rect"
+# sample_project.json carries two extras. Extras are gone, so they must be
+# dropped — and SAID to be dropped, not silently left out of the export.
+_msg = " ".join(legacy.txt_status.get_text().split())
+assert "2 extra(s)" in _msg and "ignored" in _msg, _msg
 legacy._on_extract(None)
 legacy.tb_out.set_val("gui_legacy")
 legacy._on_export_cad(None)

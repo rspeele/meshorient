@@ -11,10 +11,32 @@ MeshMixer (registration, clamshell splitting), OpenSCAD (the boolean and
 the STL), SolveSpace (editing the exported profiles), VCarve (CNC), FDM
 printing for fit prototypes.
 
+## What the user actually uses it for (as of 2026-07-31)
+
+Their scanning workflow now usually yields a manifold scan first try, and
+they are fluent enough in Blender to do clearances and corner clean-up with
+cubes on the raw scan. So the tool's day-to-day job has narrowed to:
+
+  1. scan, make watertight (MeshMixer if needed);
+  2. **open in frame2solid, PCA-orient, level in step 2, re-export the
+     oriented STL** — this is the part no other tool of theirs does as well,
+     and it is the reason the tool is still in the workflow;
+  3. clean up / add clearances in Blender;
+  4. subtract the frame from the scanned grip mesh in Blender.
+
+Steps 1-2 are therefore the load-bearing feature. Tiers/silhouette/CAD
+export stay because the DXFs are the right thing for VCarve and SolveSpace
+and the feature is well developed — but do not assume the user is exercising
+them on every project. The **Extras** step (tilted boxes for the magazine
+path, Y-cylinders for grip screws) was REMOVED on 2026-07-31: it never
+earned its keep, and a cube in Blender does the same job better. Do not
+reintroduce it. Old project JSONs still load; their `extras` key is ignored
+and `_on_proj_load` says so in the status line.
+
 ## Architecture & key decisions
 
 - `core.py` — the pipeline, pure functions, importable headless.
-- `app.py` — matplotlib-widget GUI (6 steps via radio buttons; step indices
+- `app.py` — matplotlib-widget GUI (5 steps via radio buttons; step indices
   are the S_* constants, never bare numbers). matplotlib
   widgets (NOT tkinter) were chosen so the GUI is testable headless with the
   Agg backend; on Windows it runs on the default TkAgg backend.
@@ -53,7 +75,7 @@ printing for fit prototypes.
   test_gui asserts no tier gets reverted on the synthetic.
 - Round tier islands are exported as true DXF `CIRCLE` entities, not polygons
   (`fit_circle`, `_split_circles`, `circle_tol` on `sketch_model`, "circle fit
-  mm" in step 6, 0 = off). A 3.5 mm screw clearance measured on a 0.2 mm
+  mm" in the Export step, 0 = off). A 3.5 mm screw clearance measured on a 0.2 mm
   raster only supports ~12 vertices — that is the information limit, so no
   amount of tolerance tuning makes a polygon rounder. Detection details that
   matter: sample the boundary at vertices AND EDGE MIDPOINTS (every regular
@@ -72,7 +94,7 @@ printing for fit prototypes.
   of the DXF output; the box exists so it can be switched off.
 - The output is CAD, not mesh. `sketch_model()` + `export_cad()`: the tier
   model IS a sketch-and-extrude model, so it exports losslessly as one DXF
-  per sketch (base outline, each tier, each extra) + `all_sketches.dxf` (one
+  per sketch (base outline, each tier) + `all_sketches.dxf` (one
   layer each) + `build.txt` (the extrusion table) + `assembly.scad`
   (OpenSCAD rebuild, exact geometry, with the donor-grip `difference()`
   commented in). Every tier extrudes from the same plane y=base_y0, so CAD
@@ -98,9 +120,7 @@ printing for fit prototypes.
   fills far less area twice). test_pipeline's cube case guards this.
 - The solid is TWO-SIDED: bounded by two independent face surfaces
   yL(x,z) <= y <= yR(x,z), built from a stack of THICKNESS TIERS per side
-  (see below). Not symmetric about Y=0. Extras (tilted boxes for the
-  magazine path, Y-cylinders for grip screws) each carry a `yc` mid-offset
-  so they can sit on one side only.
+  (see below). Not symmetric about Y=0.
 - The Level step (2) exists because PCA leaves a few tenths of a degree of
   tilt, and that alone makes one end of a flat side measure thicker than the
   other — which the two-sided tier model then bakes in. The user clicks 3+
@@ -266,7 +286,7 @@ printing for fit prototypes.
 
 ## GUI gotchas (learned the hard way)
 
-- All six steps' widgets occupy the SAME panel coordinates; step switching
+- All five steps' widgets occupy the SAME panel coordinates; step switching
   hides other steps' widgets. Hidden matplotlib widgets STILL receive clicks —
   they must also be deactivated. See App._enable(): RadioButtons.set_active(i)
   means "select option i", so those get `w._active = flag` instead. If you add
@@ -322,9 +342,6 @@ printing for fit prototypes.
   figure and forces a synchronous draw+flush first, so the user sees "this
   view is stale, a new one is coming". The stale view underneath is
   deliberate.
-- Text boxes in the Extras step still edit "the last extra" — a deliberate v1
-  simplification. Tiers have a real selection model now; extras
-  are the obvious next candidate for the same treatment.
 
 ## Testing
 
@@ -355,7 +372,8 @@ printing for fit prototypes.
   that edits do nothing until Apply, that the busy badge is up *during* the
   re-cut, the CAD export writing every sketch without needing anything
   else, project JSON round-trip, and that legacy rectangle projects still
-  export.
+  export — including sample_project.json, whose two now-obsolete `extras`
+  must be dropped AND reported in the status line, not silently ignored.
 - Run both after ANY change to core.py or app.py. There is also a click-
   routing regression concern: clicking "Extract silhouette" in step 3 must NOT
   trigger step 1's Browse dialog (overlapping hidden widgets).
@@ -363,10 +381,11 @@ printing for fit prototypes.
 ## Known limitations / roadmap candidates
 
 - 2.5D per side: each tier is a flat extrusion, so draft/rounds/chamfers
-  become steps. Genuinely non-2.5D features are covered by oversized extras.
-  Fine for the subtraction use-case (it errs thick).
+  become steps. Genuinely non-2.5D features (angled dovetails, tapered
+  magwell mouths) are a cube in Blender now, subtracted from the donor grip
+  alongside this solid. Fine for the subtraction use-case (it errs thick).
 - Tier outlines are clipped to the silhouette; a tier cannot extend past the
-  frame profile even after grow_mm. Use an extra for that.
+  frame profile even after grow_mm. Extend it in Blender.
 - Silhouette keeps only largest outer contour; scan junk must be pre-cropped.
 - The DXF export is verified here only against the format spec and the
   round-trip reader in test_pipeline.py (no SolveSpace/OpenSCAD available).
@@ -375,12 +394,11 @@ printing for fit prototypes.
   been run through OpenSCAD or SolveSpace. If an importer complains, entity
   types are the first place to look — test_pipeline asserts nothing but
   LINE/CIRCLE is emitted.
-- Possible next features: select/edit individual extras (tiers have this
-  now), extras along arbitrary axes, an "extend beyond silhouette" helper
-  for where the frame exits the grip, per-extra clearance opt-out, a
-  coverage heat-map overlay in the Tiers step, ARCS in the DXF (full circles
-  are done — fillets and rounded slot ends are the obvious next case, and
-  R12 ARC is as portable as CIRCLE).
+- Possible next features: a coverage heat-map overlay in the Tiers step,
+  ARCS in the DXF (full circles are done — fillets and rounded slot ends are
+  the obvious next case, and R12 ARC is as portable as CIRCLE). Anything
+  that makes steps 1-2 faster or more certain is worth more than anything
+  that adds to steps 3-5 — see "What the user actually uses it for".
 - The user's broader workflow is documented in grip-transplant-workflow.md
   (may be in a parent folder): scan → this tool → registration in MeshMixer →
   boolean (Blender 4.5 Manifold solver or OpenSCAD+Manifold) → wall-thickness
