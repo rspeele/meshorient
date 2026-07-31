@@ -20,17 +20,38 @@ Three fixed orthographic panels down the left, one orbiting 3D view on the
 right. The ortho panels re-frame themselves to the whole model after every
 change, so they are a live check on an orientation you are actively editing.
 
-| | view | on screen |
+| | shows | on screen |
 |---|---|---|
-| **R** | right side, camera on +Y | X left, Z up |
-| **T** | top, camera on +Z | X right, Y up |
-| **B** | back, camera on −X | Y left, Z up |
+| **R** | the right side (−Y face) | +X right, +Z up |
+| **T** | the top (+Z face) | +X right, +Y up |
+| **B** | the back (−X face) | −Y right, +Z up |
 | **3D** | orbit | drag orbit · middle-drag pan · wheel zoom · click pick · right-click unpick |
 
 These are genuine orthographic views, not mirrored to look familiar. A
 mirrored side view is a real trap — it turns a right-hand part into a
 left-hand one and nothing on screen says so — so each panel spells out which
 way its axes run.
+
+### Which way round
+
+The world is right-handed, so naming three views leaves no free choice. Fix
+the bore along +X and up along +Z, and the gun's right side is **forced** to
+−Y, because right = bore × up:
+
+    +X = muzzle / forward      -X = back
+    +Z = up                    -Z = down
+    -Y = the gun's RIGHT       +Y = the gun's left
+
+Orient the scan so the top shows in T and the back shows in B, and R then
+genuinely shows the right side with the muzzle running off to the right of
+frame. (The Right panel originally looked from +Y, which quietly contradicted
+the Back panel: satisfying B forces the muzzle to +X, which makes +Y the
+*left* side. The two labels could not both be true for any orientation.)
+
+Note this is the opposite Y sense to f2s's synthetic scan, which puts its
+"right side" trigger-bar boss at +Y and so implies a muzzle at −X. Nothing in
+either tool depends on it — squaring works off whichever flat side you pick —
+but it is why the two can disagree about which side is "right".
 
 ## Three stages
 

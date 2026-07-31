@@ -31,9 +31,9 @@ type ViewKind =
         // whatever standing in that position actually gives you. Spelled out
         // because a mirrored side view is a real trap: it turns a right-hand
         // part into a left-hand one and nothing on screen says so.
-        | Right -> "RIGHT (+Y)   X left, Z up"
-        | Top -> "TOP (+Z)   X right, Y up"
-        | Back -> "BACK (-X)   Y left, Z up"
+        | Right -> "RIGHT side (-Y)   +X right, +Z up"
+        | Top -> "TOP (+Z)   +X right, +Y up"
+        | Back -> "BACK (-X)   -Y right, +Z up"
         | Free -> "drag: orbit · middle-drag: pan · wheel: zoom · click: pick · right-click: unpick"
 
 /// One panel: which view it shows and where it sits, in control (DIP)
@@ -55,12 +55,37 @@ let panelLayout (w : float) (h : float) : Panel[] =
         { Kind = Free; Rect = Rect(leftW, 0.0, w - leftW, h) } |]
 
 /// Eye direction (from the model toward the camera) and up vector per view.
+///
+/// THE HANDEDNESS TRAP, because it caught this file once already. The world is
+/// right-handed, so naming three views leaves no free choice: fix the bore
+/// along +X and up along +Z, and the gun's right side is FORCED to -Y, since
+/// right = bore x up. It is NOT +Y.
+///
+/// The Right panel therefore looks from -Y. It looked from +Y at first, which
+/// silently contradicted the Back panel looking from -X: putting the back of
+/// the gun in the Back panel forces the muzzle to +X, which makes +Y the LEFT
+/// side, so the "Right" panel showed the gun's left (user-reported). The two
+/// labels could not both be true at once for any orientation.
+///
+/// The convention that makes all three consistent, and the one assumed here:
+///     +X = muzzle / forward      -X = back
+///     +Z = up                    -Z = down
+///     -Y = the gun's right       +Y = the gun's left
+/// Orient so the top shows in the Top panel and the back in the Back panel,
+/// and the Right panel then genuinely shows the right side, with the muzzle
+/// running off to the right of frame — which is also how f2s plots its side
+/// view and how the sketch this layout came from was drawn.
+///
+/// Note this is the opposite Y sense to f2s's synthetic scan, which puts its
+/// "right side" trigger-bar boss at +Y and so implies a muzzle at -X. Nothing
+/// in either tool depends on it — squaring works off whichever flat side you
+/// pick — but it is why the two can disagree about which side is "right".
 let private orthoBasis (kind : ViewKind) =
     match kind with
-    | Right -> Vector3(0.0f, 1.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
+    | Right -> Vector3(0.0f, -1.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
     | Top -> Vector3(0.0f, 0.0f, 1.0f), Vector3(0.0f, 1.0f, 0.0f)
     | Back -> Vector3(-1.0f, 0.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
-    | Free -> Vector3(0.0f, 1.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
+    | Free -> Vector3(0.0f, -1.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
 
 let private toV3 (v : Vec3) = Vector3(float32 v.X, float32 v.Y, float32 v.Z)
 
@@ -108,10 +133,10 @@ type Orbit =
 let defaultOrbit =
     {   Target = Vector3.Zero
         Distance = 300.0f
-        // Off the frame's right-front quarter, tilted down a little: enough
-        // parallax to read the shape, and the right face — the one you level
-        // off — already turned toward you.
-        Yaw = MathF.PI * 0.20f
+        // Off the front-right quarter (+X, -Y), tilted down a little: enough
+        // parallax to read the shape, and the same side the Right panel shows
+        // already turned toward you, so the two views agree at a glance.
+        Yaw = MathF.PI * -0.20f
         Pitch = MathF.PI * 0.12f
         FovY = MathF.PI * 0.25f }
 
