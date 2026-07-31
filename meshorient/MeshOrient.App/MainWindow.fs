@@ -45,8 +45,16 @@ type MainWindow() as this =
 
     let setStatus (msg : string) = status.Text <- msg
 
-    let refreshFit () =
-        fitLabel.Text <- match state.CurrentFit() with Some s -> s | None -> ""
+    let refreshFit () = fitLabel.Text <- state.CurrentFit()
+
+    /// The two alignment buttons, held so their enabled state can follow the
+    /// pick count. A button that is offered must be a button that works.
+    let mutable btSquare : Button = null
+    let mutable btStraighten : Button = null
+
+    let refreshEnabled () =
+        if not (isNull btSquare) then btSquare.IsEnabled <- state.CanSquare
+        if not (isNull btStraighten) then btStraighten.IsEnabled <- state.CanStraighten
 
     let refreshCaptions () =
         let panels = panelLayout view.Bounds.Width view.Bounds.Height
@@ -59,10 +67,11 @@ type MainWindow() as this =
                 t.IsVisible <- true
             | None -> t.IsVisible <- false
 
-    /// Everything that has to happen after the model moves.
+    /// Everything that has to happen after the model moves or the picks change.
     let refresh () =
         view.InvalidateOverlay()
         refreshFit ()
+        refreshEnabled ()
         refreshCaptions ()
 
     let button (label : string) (tip : string) (handler : unit -> unit) =
@@ -108,7 +117,7 @@ type MainWindow() as this =
         | Ok r ->
             view.FrameCamera()
             refresh ()
-            setStatus $"Squared: rotated %.3f{r.TiltDegrees}° so the picked face is perpendicular to Y. Your %d{state.ActivePicks.Count} points were coplanar to ±%.3f{r.RmsMm} mm — that is the scan's own flatness. Press Square again and it should read 0.000°."
+            setStatus $"Squared: rotated %.3f{r.TiltDegrees}° so the picked face is perpendicular to Y. Your %d{state.Picks.Count} points were coplanar to ±%.3f{r.RmsMm} mm — that is the scan's own flatness. Next: Clear picks, then pick a flat top face and press STRAIGHTEN."
 
     let doStraighten () =
         match state.ApplyStraighten() with
@@ -153,33 +162,16 @@ type MainWindow() as this =
             | None -> ()
         } :> Task
 
-    // --------------------------------------------------------- stage picker
-
-    let stageBox = ComboBox(Margin = Thickness(0.0, 0.0, 10.0, 0.0), Width = 210.0)
-
-    let stageHint () =
-        match state.Stage with
-        | Coarse -> "Coarse: auto-orient, then fix any 90° swap by hand."
-        | Square -> "Square: click 3+ points on ONE flat side face in the 3D view, then press Square."
-        | Straighten -> "Straighten: click 2+ points on a flat top or bottom face (a slide top is ideal), then press Straighten."
-
     do
         this.Title <- "meshorient"
         this.Width <- 1280.0
         this.Height <- 820.0
         this.Background <- SolidColorBrush(Color.FromRgb(0x1Euy, 0x1Fuy, 0x22uy))
 
-        stageBox.ItemsSource <- [| "1 · Coarse (PCA / 90°)"; "2 · Square to Y"; "3 · Straighten about Y" |]
-        stageBox.SelectedIndex <- 0
-        stageBox.SelectionChanged.Add(fun _ ->
-            state.Stage <-
-                match stageBox.SelectedIndex with
-                | 1 -> Square
-                | 2 -> Straighten
-                | _ -> Coarse
-            refresh ()
-            setStatus (stageHint ()))
-
+        // No stage selector. Its only real job was routing clicks into one of
+        // two pick lists, which is exactly how STRAIGHTEN came to report "no
+        // points selected" with points on screen. One list, both buttons, and
+        // each button greys itself out until it has what it needs.
         let toolbar = StackPanel(Orientation = Orientation.Horizontal, Margin = Thickness(10.0, 8.0))
         toolbar.Children.Add(button "Open…" "Load an STL, OBJ or PLY (or drag one onto the window)"
                                     (fun () -> openDialog () |> ignore))
@@ -190,10 +182,15 @@ type MainWindow() as this =
         toolbar.Children.Add(button "Flip" "Turn end for end (180° about Z)" (doRotate 2 180.0))
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
-        toolbar.Children.Add stageBox
-        toolbar.Children.Add(button "SQUARE" "Square the picked face to Y" doSquare)
-        toolbar.Children.Add(button "STRAIGHTEN" "Spin about Y until the picked face is level" doStraighten)
-        toolbar.Children.Add(button "Clear picks" "Drop every point picked for this stage" doClearPicks)
+        btSquare <- button "SQUARE"
+                        "Square the picked face to Y — needs 3+ points on one flat SIDE face"
+                        doSquare
+        btStraighten <- button "STRAIGHTEN"
+                            "Spin about Y until the picked face is level — needs 2+ points on a flat TOP or BOTTOM face"
+                            doStraighten
+        toolbar.Children.Add btSquare
+        toolbar.Children.Add btStraighten
+        toolbar.Children.Add(button "Clear picks" "Drop every picked point" doClearPicks)
         toolbar.Children.Add(button "Undo" "Step back one orientation change" doUndo)
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
@@ -230,27 +227,40 @@ type MainWindow() as this =
 
         // ------------------------------------------------------------ input
 
-        glHost.PointerPressed.Add(fun e ->
-            let p = e.GetCurrentPoint glHost
-            let button =
-                if p.Properties.IsRightButtonPressed then 3
-                elif p.Properties.IsMiddleButtonPressed then 2
-                else 1
-            if view.HandlePress(p.Position, button) then
-                refresh ()
-                setStatus $"Pick removed — %d{state.ActivePicks.Count} left.")
+        // An exception out of a pointer handler is unhandled and takes the
+        // window down with it, losing an orientation that may have taken
+        // several minutes of picking to build. One did exactly that: the
+        // readout threw on the very first pick. Report it and carry on — the
+        // state is still good, and a message in the status bar is a bug
+        // report rather than a vanished window.
+        let guarded (what : string) (body : unit -> unit) =
+            try body () with e -> setStatus $"{what} failed: {e.Message}"
 
-        glHost.PointerMoved.Add(fun e -> view.HandleMove((e.GetCurrentPoint glHost).Position))
+        glHost.PointerPressed.Add(fun e ->
+            guarded "Click" (fun () ->
+                let p = e.GetCurrentPoint glHost
+                let button =
+                    if p.Properties.IsRightButtonPressed then 3
+                    elif p.Properties.IsMiddleButtonPressed then 2
+                    else 1
+                if view.HandlePress(p.Position, button) then
+                    refresh ()
+                    setStatus $"Pick removed — %d{state.Picks.Count} left."))
+
+        glHost.PointerMoved.Add(fun e ->
+            guarded "Drag" (fun () -> view.HandleMove((e.GetCurrentPoint glHost).Position)))
 
         glHost.PointerReleased.Add(fun e ->
-            match view.HandleRelease((e.GetCurrentPoint glHost).Position) with
-            | Some world ->
-                refresh ()
-                setStatus $"Point %d{state.ActivePicks.Count} at X %.2f{world.X}, Y %.2f{world.Y}, Z %.2f{world.Z}."
-            | None -> ())
+            guarded "Pick" (fun () ->
+                match view.HandleRelease((e.GetCurrentPoint glHost).Position) with
+                | Some world ->
+                    refresh ()
+                    setStatus $"Point %d{state.Picks.Count} at X %.2f{world.X}, Y %.2f{world.Y}, Z %.2f{world.Z}."
+                | None -> ()))
 
         glHost.PointerWheelChanged.Add(fun e ->
-            view.HandleWheel((e.GetCurrentPoint glHost).Position, e.Delta.Y))
+            guarded "Zoom" (fun () ->
+                view.HandleWheel((e.GetCurrentPoint glHost).Position, e.Delta.Y)))
 
         // Captions have to follow the panels, and the panels are laid out from
         // the control's size, so re-place them whenever that changes.
@@ -267,7 +277,8 @@ type MainWindow() as this =
             | null -> ()
             | f -> loadFrom f.Path.LocalPath)
 
-        setStatus "Open a scan (or drag one in). Then: auto-orient, square off a flat side face, straighten off a flat top."
+        refreshEnabled ()
+        setStatus "Open a scan (or drag one in). Then: Auto-orient · pick 3+ on a flat SIDE face and press SQUARE · Clear picks · pick 2+ on a flat TOP face and press STRAIGHTEN · Export."
 
     /// Load a file named on the command line, once the window exists.
     member _.LoadInitial(path : string) =

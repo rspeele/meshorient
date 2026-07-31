@@ -1,5 +1,17 @@
 /// The tool's whole model: a mesh, the rigid transform being built for it, and
-/// the points picked for each alignment stage.
+/// the points picked for whatever alignment comes next.
+///
+/// There is NO mode. One pick list, and both alignment operations read it:
+/// SQUARE wants 3+ points on a flat side face, STRAIGHTEN wants 2+ on a flat
+/// top or bottom. Nothing has to be told which you meant, so nothing can be
+/// set wrong.
+///
+/// It was modal at first — a stage dropdown routing clicks into one of two
+/// hidden pick lists. That made SQUARE work from the default mode while
+/// STRAIGHTEN refused with "no points selected" with points plainly on screen
+/// (user-reported): the button was reading the other list. A selector whose
+/// only job is deciding which invisible bucket your clicks land in is not a
+/// feature, it is a way to be wrong.
 ///
 /// No Avalonia and no GL here, so every operation the buttons invoke can be
 /// exercised without a window.
@@ -8,22 +20,14 @@ namespace MeshOrient.App
 open System
 open MeshOrient.Core
 
-type Stage =
-    /// PCA and the 90-degree buttons.
-    | Coarse
-    /// Pick 3+ on a flat side face; square it to Y.
-    | Square
-    /// Pick 2+ on a flat top or bottom face; spin about Y until it is level.
-    | Straighten
-
 /// A picked point, in MODEL space. The surface normal comes along so the
 /// marker can be nudged clear of the face it sits on instead of z-fighting
 /// with it.
 type Pick = { Point : Vec3; Normal : Vec3 }
 
-/// The axis the Square stage targets and the Straighten stage rotates about.
-/// Hard-coded to Y (across the frame) — the core functions both take an axis
-/// index, so exposing it is a UI change and nothing more.
+/// The axis SQUARE targets and STRAIGHTEN rotates about. Hard-coded to Y
+/// (across the frame) — the core functions both take an axis index, so
+/// exposing it is a UI change and nothing more.
 [<AutoOpen>]
 module private Constants =
     let lockedAxis = 1
@@ -37,14 +41,11 @@ type OrientState() =
     let undo = System.Collections.Generic.Stack<Mat3 * Vec3>()
 
     // Picks live in MODEL space, not world space. That means a re-orientation
-    // carries them along for free: press Square twice and the second reading
-    // is 0.00 degrees, because the picks moved with the mesh they were taken
+    // carries them along for free: press SQUARE twice and the second reading
+    // is 0.000 degrees, because the picks moved with the mesh they were taken
     // on. f2s has to do this by hand (`level_pts` are rewritten through every
     // transform); here it falls out of the representation.
-    let squarePicks = ResizeArray<Pick>()
-    let straightenPicks = ResizeArray<Pick>()
-
-    let mutable stage = Coarse
+    let picks = ResizeArray<Pick>()
 
     let reframe () =
         match mesh with
@@ -67,34 +68,32 @@ type OrientState() =
     member _.Rotation = rotation
     member _.Offset = offset
     member _.Bounds = bounds
-    member _.Stage with get () = stage and set v = stage <- v
     member _.CanUndo = undo.Count > 0
+
+    /// Whether each operation has enough picks to run. The window greys its
+    /// buttons on these, so a button is never offered that can only fail.
+    member _.CanSquare = picks.Count >= 3
+    member _.CanStraighten = picks.Count >= 2
 
     member _.SourcePath = match mesh with Some m -> m.SourcePath | None -> ""
 
     member _.TriangleCount = match mesh with Some m -> m.TriangleCount | None -> 0
 
-    /// Picks for the stage currently selected, in model space.
-    member _.ActivePicks =
-        match stage with
-        | Straighten -> straightenPicks
-        | _ -> squarePicks
+    /// Every picked point, in model space. One list, both operations.
+    member _.Picks = picks
 
     member private _.ToWorld(p : Pick) = Mat3.apply rotation p.Point + offset
 
     /// Marker centres: the hit point nudged a little way out along the surface
     /// normal so the sphere sits proud of the face rather than half-buried in
     /// it, z-fighting.
-    member this.ActiveMarkersWorld =
+    member this.MarkersWorld =
         let r = this.MarkerRadius * 0.5
-        this.ActivePicks
+        picks
         |> Seq.map (fun p -> Mat3.apply rotation (p.Point + p.Normal * r) + offset)
         |> Seq.toArray
 
-    member this.ActivePicksWorld =
-        this.ActivePicks |> Seq.map this.ToWorld |> Seq.toArray
-
-    member this.SquarePicksWorld = squarePicks |> Seq.map this.ToWorld |> Seq.toArray
+    member this.PicksWorld = picks |> Seq.map this.ToWorld |> Seq.toArray
 
     /// How big a pick marker should be so it reads the same on a 20 mm part
     /// and a 400 mm one.
@@ -109,8 +108,7 @@ type OrientState() =
         mesh <- Some m
         rotation <- Mat3.identity
         offset <- Vec3.zero
-        squarePicks.Clear()
-        straightenPicks.Clear()
+        picks.Clear()
         undo.Clear()
         recentre ()
         m
@@ -177,7 +175,7 @@ type OrientState() =
         match this.Trace ray with
         | None -> None
         | Some hit ->
-            this.ActivePicks.Add { Point = hit.Point; Normal = hit.Normal }
+            picks.Add { Point = hit.Point; Normal = hit.Normal }
             Some(Mat3.apply rotation hit.Point + offset)
 
     /// Remove whichever pick is nearest where this ray hits the mesh.
@@ -187,8 +185,7 @@ type OrientState() =
         | Some hit -> this.RemoveNearestPick(Mat3.apply rotation hit.Point + offset)
 
     /// Drop the pick nearest a world-space point, for right-click-to-remove.
-    member this.RemoveNearestPick(world : Vec3) =
-        let picks = this.ActivePicks
+    member _.RemoveNearestPick(world : Vec3) =
         if picks.Count = 0 then false
         else
             let mutable best, bestD = -1, infinity
@@ -198,44 +195,55 @@ type OrientState() =
             picks.RemoveAt best
             true
 
-    member this.ClearPicks() = this.ActivePicks.Clear()
+    member _.ClearPicks() = picks.Clear()
 
-    // ------------------------------------------------------------- stages
+    // ------------------------------------------------------- the two moves
 
-    /// Square the picked face to Y. Returns the measurement, or an error to
-    /// show the user.
+    /// Square the picked face to Y. Returns the measurement, or the reason it
+    /// cannot run.
     member this.ApplySquare() : Result<Orient.SquareResult, string> =
-        let picks = this.SquarePicksWorld
-        if picks.Length < 3 then
-            Error $"Pick at least 3 points on one flat side face first ({picks.Length} so far)."
+        let world = this.PicksWorld
+        if world.Length < 3 then
+            Error $"SQUARE needs 3 or more points on one flat side face (%d{world.Length} picked)."
         else
-            let r = Orient.squareToAxis lockedAxis picks
+            let r = Orient.squareToAxis lockedAxis world
             this.ApplyRotation r.Rotation
             Ok r
 
     /// Spin about Y until the picked top/bottom face is level.
     member this.ApplyStraighten() : Result<Orient.StraightenResult, string> =
-        let picks = straightenPicks |> Seq.map this.ToWorld |> Seq.toArray
-        if picks.Length < 2 then
-            Error $"Pick at least 2 points on a flat top or bottom face first ({picks.Length} so far)."
+        let world = this.PicksWorld
+        if world.Length < 2 then
+            Error $"STRAIGHTEN needs 2 or more points on a flat top or bottom face (%d{world.Length} picked)."
         else
-            let r = Orient.straightenAbout lockedAxis picks
+            let r = Orient.straightenAbout lockedAxis world
             this.ApplyRotation r.Rotation
             Ok r
 
-    /// The current fit for whichever stage is selected, for the live readout
-    /// and the overlay traces. None when there are not enough picks yet.
-    member this.CurrentFit() : string option =
-        match stage with
-        | Straighten when straightenPicks.Count >= 2 ->
-            let r = Orient.straightenAbout lockedAxis (this.ActivePicksWorld)
-            Some $"%d{straightenPicks.Count} picks · off level by %.3f{r.AngleDegrees}° · collinear to ±%.3f{r.RmsMm} mm"
-        | Straighten -> None
-        | _ when squarePicks.Count >= 3 ->
-            let r = Orient.squareToAxis lockedAxis (this.SquarePicksWorld)
-            let ax, az = Orient.tiltComponents (this.SquarePicksWorld)
-            Some $"%d{squarePicks.Count} picks · tilt %.3f{r.TiltDegrees}° (about X %.2f{ax}°, about Z %.2f{az}°) · coplanar to ±%.3f{r.RmsMm} mm"
-        | _ -> None
+    /// What each button would do with the picks as they stand.
+    ///
+    /// BOTH are reported, always. With one pick list both are live candidates,
+    /// and the two residuals are what actually tell you which face you are on:
+    /// points spread over a flat side fit a plane tightly and a side-view line
+    /// badly, points along a top edge do the reverse. That is more use than a
+    /// mode label, and it cannot be set to the wrong thing.
+    member this.CurrentFit() : string =
+        let world = this.PicksWorld
+        // Each fit is computed ONLY inside the branch that has enough points
+        // for it. `let` is eager in F#, so binding both up front and choosing
+        // between them afterwards calls `straightenAbout` with one pick, which
+        // throws — and an exception on the pick path took the whole window
+        // down. Guard before the call, not after it.
+        if world.Length = 0 then ""
+        elif world.Length = 1 then "1 pick · SQUARE needs 3 · STRAIGHTEN needs 2"
+        else
+            let sq =
+                if world.Length < 3 then "SQUARE needs 3"
+                else
+                    let r = Orient.squareToAxis lockedAxis world
+                    $"SQUARE %.3f{r.TiltDegrees}° (±%.3f{r.RmsMm} mm)"
+            let r = Orient.straightenAbout lockedAxis world
+            $"%d{world.Length} picks · {sq} · STRAIGHTEN %.3f{r.AngleDegrees}° (±%.3f{r.RmsMm} mm)"
 
     // ------------------------------------------------------------- export
 

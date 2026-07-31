@@ -53,33 +53,50 @@ Note this is the opposite Y sense to f2s's synthetic scan, which puts its
 either tool depends on it — squaring works off whichever flat side you pick —
 but it is why the two can disagree about which side is "right".
 
-## Three stages
+## Three moves, no modes
 
-Each narrows the freedom the one before it left, and each reports how good
-your picks actually were as well as what it did.
+There is no stage selector. **One pick list, and both alignment buttons read
+it** — SQUARE wants 3+ points, STRAIGHTEN wants 2+. Nothing has to be told
+which you meant, so nothing can be set wrong. Each button greys itself out
+until it has enough points, so a button that is offered is a button that
+works, and the readout at bottom right always says what *both* would do with
+the picks you have:
 
-**1 · Coarse.** `Auto-orient` runs PCA: longest principal axis → X, thinnest
+    4 picks · SQUARE 1.312° (±0.007 mm) · STRAIGHTEN 0.529° (±0.284 mm)
+
+Those two residuals are more use than a mode label: points spread over a flat
+side fit a plane tightly and a side-view line badly, and points along a top
+edge do the reverse — so the numbers tell you which face you are actually on.
+
+The typical run is: **Auto-orient → pick a flat side → SQUARE → Clear picks →
+pick a flat top → STRAIGHTEN → Export.** But nothing enforces that order; the
+90° buttons, Undo and Export all work at any point.
+
+Each move narrows the freedom the one before it left, and each reports how
+good your picks actually were as well as what it did.
+
+**Coarse.** `Auto-orient` runs PCA: longest principal axis → X, thinnest
 → Y, middle → Z. Then the 90° and Flip buttons fix the quarter-turn
 ambiguities PCA cannot resolve. Expect PCA to leave about a degree in the X-Z
-plane on an L-shaped part like a frame — that is what stage 3 is for.
+plane on an L-shaped part like a frame — that is what Straighten is for.
 
-**2 · Square.** Click **3 or more points on one face that really is flat** in
+**SQUARE.** Click **3 or more points on one face that really is flat** in
 the 3D view — the frame's right side is ideal. A red marker drops on each. A
 plane is fitted and the *smallest* rotation that squares it to Y is applied:
-it removes tilt without spinning the model about Y, so stage 1's work stays
-put.
+it removes tilt without spinning the model about Y, so the coarse orientation
+stays put.
 
 The readout gives the tilt and the **RMS coplanarity of your picks**. That
 second number is the one to watch: it is your scan's own flatness plus your
 aim, and a large value means one pick missed the flat and the fit is not to be
-trusted. Press Square again and it should read 0.000° — picks are stored in
+trusted. The readout drops to 0.000° the moment it lands — picks are stored in
 model space, so they travel with the mesh.
 
 The fitted plane draws in red against a blue Y = 0 datum in the T and B
 panels. Square it and the red line lands parallel to the blue one. A number
 saying "0.000°" asks to be believed; two parallel lines can be checked.
 
-**3 · Straighten.** Click **2 or more points on a flat top or bottom
+**STRAIGHTEN.** Click **2 or more points on a flat top or bottom
 reference** — a Glock slide top is the ideal case — and the model spins until
 that face is level and the bore runs straight down X. Two picks define the
 line exactly; more average out the error in each, which is the point of
@@ -87,23 +104,23 @@ picking several.
 
 This rotates **about Y**, not about X. That is forced, not a preference:
 once a side face is square to Y, rotating about X or Z tips it straight back
-out of square. Rotation about the axis stage 2 locked is the only remaining
+out of square. Rotation about the axis SQUARE locked is the only remaining
 freedom — and it is exactly the one that swings the bore up and down in the
 side view. A 10° rotation about X moves the side face's normal from
 `(0, 1, 0)` to `(0, 0.985, 0.174)`; about Y it stays `(0, 1, 0)` exactly.
 `StraightenTests.Straightening_leaves_the_locked_axis_exactly_alone` is what
 stops anyone "fixing" this later.
 
-Re-running stage 2 invalidates stage 3's result but keeps its picks, so you
-can go back and forth.
+Re-squaring invalidates a previous straighten, so do them in that order — but
+nothing stops you going back and forth.
 
 ## Build
 
 - `MeshOrient.Core` — all the maths. Mesh I/O, eigen/plane/line fitting, PCA,
-  ray-mesh intersection, the three stages. No Avalonia, no GL, no OpenGL: that
+  ray-mesh intersection, the alignment moves. No Avalonia and no GL: that
   is what makes every measurement testable without a window.
 - `MeshOrient.App` — Avalonia 12 + Silk.NET.OpenGL. Same stack as CNCFlow.UI.
-- `MeshOrient.Core.Tests` — MSTest, 40 tests, run with `dotnet test`.
+- `MeshOrient.Core.Tests` — MSTest, 42 tests, run with `dotnet test`.
 
 One `OpenGlControlBase` with four `glViewport` passes, not four GL controls:
 each Avalonia GL control owns its own context, so a 760k-triangle scan would
@@ -133,6 +150,11 @@ The load-bearing ones:
   poses auto-orients to bounding boxes agreeing to 0.01 mm. Repeatability
   matters more here than accuracy — if it drifted, two exports of the same
   part would land in different places.
+- **The readout survives every pick count.** It runs on every click, including
+  the first, and `let` is eager in F# — binding both fits before choosing
+  between them called `straightenAbout` with one point, which throws, and an
+  exception on the pick path took the window down. One click on a freshly
+  loaded scan was enough to kill it.
 - **The full run**, in `OrientStateTests`: load a deliberately crooked scan,
   auto-orient, pick four wall points, Square twice (0.291° → 0.0000°), export,
   re-import and confirm the written STL is already square.

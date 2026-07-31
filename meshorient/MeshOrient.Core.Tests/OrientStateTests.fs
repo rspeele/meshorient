@@ -67,12 +67,11 @@ type OrientStateTests () =
     [<TestMethod>]
     member _.Picks_follow_the_model_through_a_re_orientation () =
         let s = loaded ()
-        s.Stage <- Square
         match s.PickAt(rayFromRight 0.0 20.0) with
         | None -> Assert.Fail "expected the ray to hit the right wall"
         | Some before ->
             s.ApplyRotation(Mat3.rotDegrees 2 90.0)
-            let after = s.ActivePicksWorld[0]
+            let after = s.PicksWorld[0]
             printfn "pick before %A, after a 90 deg Z rotation %A" before after
             // Rotating about Z about the (centred) origin: the pick must land
             // where that same bit of surface landed, not stay put.
@@ -83,7 +82,6 @@ type OrientStateTests () =
     [<TestMethod>]
     member _.Square_needs_three_picks_and_says_so () =
         let s = loaded ()
-        s.Stage <- Square
         s.PickAt(rayFromRight 0.0 20.0) |> ignore
         match s.ApplySquare() with
         | Ok _ -> Assert.Fail "one pick cannot define a plane"
@@ -106,7 +104,6 @@ type OrientStateTests () =
             s.AutoOrient()
 
             // Square off four points on the flat right wall.
-            s.Stage <- Square
             let mutable picked = 0
             for (x, z) in Fixtures.flatRightWallProbes do
                 if (s.PickAt(rayFromRight x z)).IsSome then picked <- picked + 1
@@ -160,21 +157,78 @@ type OrientStateTests () =
         Assert.AreEqual(before.X, back.X, 1e-9, "X restored")
         Assert.AreEqual(before.Z, back.Z, 1e-9, "Z restored")
 
+    /// Both operations read the SAME pick list, and there is no mode to have
+    /// set wrong.
+    ///
+    /// This replaces a test that asserted the opposite. Two lists, routed by a
+    /// stage dropdown, meant a point you had just clicked was invisible to
+    /// whichever button was reading the other one: STRAIGHTEN reported "no
+    /// points selected" with markers plainly on screen (user-reported). The
+    /// separation had no purpose — the two stages are sequential, and you
+    /// never need both sets of picks at once.
     [<TestMethod>]
-    member _.Square_and_straighten_keep_separate_pick_lists () =
-        // They reference different faces; sharing one list would mean each
-        // stage silently consuming the other's points.
+    member _.Both_operations_read_the_same_picks () =
         let s = loaded ()
-        s.Stage <- Square
-        s.PickAt(rayFromRight 0.0 20.0) |> ignore
+        Assert.IsFalse(s.CanSquare, "no picks yet")
+        Assert.IsFalse(s.CanStraighten, "no picks yet")
+
+        s.PickAt(rayFromRight -30.0 20.0) |> ignore
         s.PickAt(rayFromRight 30.0 20.0) |> ignore
-        s.Stage <- Straighten
-        Assert.AreEqual(0, s.ActivePicks.Count, "Straighten starts with its own empty list")
-        s.PickAt({ Raycast.Origin = Vec3.create 0.0 0.0 1000.0
-                   Raycast.Direction = Vec3.create 0.0 0.0 -1.0 }) |> ignore
-        Assert.AreEqual(1, s.ActivePicks.Count)
-        s.Stage <- Square
-        Assert.AreEqual(2, s.ActivePicks.Count, "Square's picks are still there")
+        Assert.AreEqual(2, s.Picks.Count)
+        // Two points is enough to straighten and not enough to square, and
+        // that is the ONLY thing that gates either button.
+        Assert.IsFalse(s.CanSquare, "2 picks cannot define a plane")
+        Assert.IsTrue(s.CanStraighten, "2 picks can define a line")
+        match s.ApplyStraighten() with
+        | Error e -> Assert.Fail $"STRAIGHTEN should have run on the picks that exist: {e}"
+        | Ok _ -> ()
+
+        s.PickAt(rayFromRight 0.0 -50.0) |> ignore
+        Assert.IsTrue(s.CanSquare, "3 picks can define a plane")
+        match s.ApplySquare() with
+        | Error e -> Assert.Fail $"SQUARE should have run on the same picks: {e}"
+        | Ok _ -> ()
+
+        s.ClearPicks()
+        Assert.IsFalse(s.CanSquare)
+        Assert.IsFalse(s.CanStraighten)
+
+    /// The readout has to describe both operations, because with one list both
+    /// are always live and the residuals are how you tell which face you are
+    /// actually on.
+    [<TestMethod>]
+    member _.Readout_reports_what_both_buttons_would_do () =
+        let s = loaded ()
+        Assert.AreEqual("", s.CurrentFit(), "nothing picked, nothing to say")
+        for (x, z) in Fixtures.flatRightWallProbes do
+            s.PickAt(rayFromRight x z) |> ignore
+        let text = s.CurrentFit()
+        printfn "readout: %s" text
+        Assert.IsTrue(text.Contains "SQUARE", "should say what SQUARE would do")
+        Assert.IsTrue(text.Contains "STRAIGHTEN", "should say what STRAIGHTEN would do")
+        Assert.IsTrue(text.Contains "4 picks", "should say how many points there are")
+
+    /// The readout runs on EVERY pick, including the first, so it has to
+    /// survive counts too small for either fit.
+    ///
+    /// It did not. `let` is eager in F#, so binding both fits before choosing
+    /// between them called `straightenAbout` with a single point, which throws
+    /// — and an exception on the pick path killed the window outright. One
+    /// click on a freshly loaded scan was enough.
+    [<TestMethod>]
+    member _.Readout_survives_every_pick_count_from_zero_up () =
+        let s = loaded ()
+        let probes =
+            [| yield! Fixtures.flatRightWallProbes
+               yield (0.0, 20.0); yield (-15.0, -30.0) |]
+        for i in 0 .. probes.Length - 1 do
+            // Must not throw at ANY count — 1 is the case that took it down.
+            let text = s.CurrentFit()
+            printfn "%d picks -> %s" i text
+            Assert.IsNotNull text
+            let (x, z) = probes[i]
+            s.PickAt(rayFromRight x z) |> ignore
+        Assert.IsTrue((s.CurrentFit()).Length > 0)
 
     [<TestMethod>]
     member _.Marker_radius_scales_with_the_model () =

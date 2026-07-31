@@ -81,40 +81,44 @@ type GlView(state : OrientState) as this =
             let padX = (hi.X - lo.X) * 0.08 + 1.0
             let padZ = (hi.Z - lo.Z) * 0.08 + 1.0
 
-            match state.Stage with
-            | Straighten ->
-                let picks = state.ActivePicksWorld
-                if picks.Length >= 2 then
-                    let fit = picks |> Array.map (fun p -> p.X, p.Z) |> Geometry.fitLine2
-                    // Datum: level, through the picks' own centroid, so the
-                    // comparison is like-for-like rather than against Z = 0.
-                    seg (v3 (lo.X - padX) c.Y fit.CentroidY)
-                        (v3 (hi.X + padX) c.Y fit.CentroidY) datum
-                    // Trace: the fitted line, extended across the model.
-                    let t = (hi.X - lo.X) * 0.6 + padX
-                    let p0 = v3 (fit.CentroidX - fit.DirX * t) c.Y (fit.CentroidY - fit.DirY * t)
-                    let p1 = v3 (fit.CentroidX + fit.DirX * t) c.Y (fit.CentroidY + fit.DirY * t)
-                    seg p0 p1 trace
-            | _ ->
-                let picks = state.SquarePicksWorld
-                // Y = 0 datum, drawn along X (reads in the Top panel) and
-                // along Z (reads in the Back panel).
-                seg (v3 (lo.X - padX) 0.0 c.Z) (v3 (hi.X + padX) 0.0 c.Z) datum
-                seg (v3 c.X 0.0 (lo.Z - padZ)) (v3 c.X 0.0 (hi.Z + padZ)) datum
-                if picks.Length >= 3 then
-                    let fit = Geometry.fitPlane picks
-                    let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal
-                    if abs n.Y > 1e-9 then
-                        let cen = fit.Centroid
-                        // Where the fitted plane cuts a line of constant X (or
-                        // constant Z) — the same two traces f2s draws on its
-                        // front and top views.
-                        let yAt (x : float) (z : float) =
-                            cen.Y - (n.X * (x - cen.X) + n.Z * (z - cen.Z)) / n.Y
-                        let x0, x1 = lo.X - padX, hi.X + padX
-                        seg (v3 x0 (yAt x0 cen.Z) c.Z) (v3 x1 (yAt x1 cen.Z) c.Z) trace
-                        let z0, z1 = lo.Z - padZ, hi.Z + padZ
-                        seg (v3 c.X (yAt cen.X z0) z0) (v3 c.X (yAt cen.X z1) z1) trace
+            let picks = state.PicksWorld
+
+            // No mode to switch on. Each panel gets the fit that belongs to
+            // it, and they never collide because they live in different
+            // panels: the plane fit SQUARE would use reads in Top and Back,
+            // the side-view line fit STRAIGHTEN would use reads in Right.
+            // Whichever face you actually picked, the panel you are looking
+            // at is showing you the right thing.
+
+            // --- for SQUARE: Y = 0 datum along X (reads in Top) and along Z
+            //     (reads in Back), plus the fitted plane's two traces.
+            seg (v3 (lo.X - padX) 0.0 c.Z) (v3 (hi.X + padX) 0.0 c.Z) datum
+            seg (v3 c.X 0.0 (lo.Z - padZ)) (v3 c.X 0.0 (hi.Z + padZ)) datum
+            if picks.Length >= 3 then
+                let fit = Geometry.fitPlane picks
+                let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal
+                if abs n.Y > 1e-9 then
+                    let cen = fit.Centroid
+                    // Where the fitted plane cuts a line of constant X (or of
+                    // constant Z) — the same two traces f2s draws on its front
+                    // and top views.
+                    let yAt (x : float) (z : float) =
+                        cen.Y - (n.X * (x - cen.X) + n.Z * (z - cen.Z)) / n.Y
+                    let x0, x1 = lo.X - padX, hi.X + padX
+                    seg (v3 x0 (yAt x0 cen.Z) c.Z) (v3 x1 (yAt x1 cen.Z) c.Z) trace
+                    let z0, z1 = lo.Z - padZ, hi.Z + padZ
+                    seg (v3 c.X (yAt cen.X z0) z0) (v3 c.X (yAt cen.X z1) z1) trace
+
+            // --- for STRAIGHTEN: a level datum through the picks' own
+            //     centroid (like-for-like, rather than against Z = 0) and the
+            //     fitted side-view line.
+            if picks.Length >= 2 then
+                let fit = picks |> Array.map (fun p -> p.X, p.Z) |> Geometry.fitLine2
+                seg (v3 (lo.X - padX) c.Y fit.CentroidY)
+                    (v3 (hi.X + padX) c.Y fit.CentroidY) datum
+                let t = (hi.X - lo.X) * 0.6 + padX
+                seg (v3 (fit.CentroidX - fit.DirX * t) c.Y (fit.CentroidY - fit.DirY * t))
+                    (v3 (fit.CentroidX + fit.DirX * t) c.Y (fit.CentroidY + fit.DirY * t)) trace
         verts.ToArray()
 
     let modelMatrix () =
@@ -240,23 +244,21 @@ type GlView(state : OrientState) as this =
                 let view, proj = matricesFor panel.Kind aspect
                 Scene.drawLit gl progs meshBuf model view proj meshColour
 
-                for centre in state.ActiveMarkersWorld do
+                for centre in state.MarkersWorld do
                     let m =
                         Matrix4x4.CreateScale markerR
                         * Matrix4x4.CreateTranslation(
                             Vector3(float32 centre.X, float32 centre.Y, float32 centre.Z))
                     Scene.drawLit gl progs sphereBuf m view proj pickColour
 
-                // Overlays only where they mean something: the Square traces
-                // read in the Top and Back panels (f2s draws them on exactly
-                // those two views), the Straighten trace in the side view it
-                // is fitted in. Drawing them everywhere would be clutter.
+                // Overlays only in the panels they mean something in: the
+                // SQUARE traces read in Top and Back (exactly the two views
+                // f2s draws them on), the STRAIGHTEN trace in the side view
+                // it is fitted in. The 3D panel stays clean.
                 let wantsOverlay =
-                    match state.Stage, panel.Kind with
-                    | Straighten, Right -> true
-                    | Straighten, _ -> false
-                    | _, Top | _, Back -> true
-                    | _ -> false
+                    match panel.Kind with
+                    | Top | Back | Right -> true
+                    | Free -> false
                 if wantsOverlay then
                     // Depth test off: a datum buried inside the model is no
                     // use as something to compare against.
