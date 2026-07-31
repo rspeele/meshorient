@@ -40,3 +40,10 @@ test_project.json
 
 # Build previews / screenshots dropped in the working folder
 *.png
+
+# --- .NET (meshorient/) ---
+# The mesh rule above is `*.obj`, which matches FILES called *.obj; it does
+# nothing about MSBuild's obj/ directories, hence these.
+bin/
+obj/
+*.user

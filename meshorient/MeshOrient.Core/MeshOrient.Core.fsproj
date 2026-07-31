@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- No Avalonia, no Silk.NET, no UI of any kind. That is what makes every
+         measurement in this tool unit-testable without opening a window. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>5</WarningLevel>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Vec.fs" />
+    <Compile Include="Mesh.fs" />
+    <Compile Include="MeshIO.fs" />
+    <Compile Include="Geometry.fs" />
+    <Compile Include="Raycast.fs" />
+    <Compile Include="Orient.fs" />
+  </ItemGroup>
+
+</Project>

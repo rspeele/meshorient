@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MSTest" Version="4.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="MSTestSettings.fs" />
+    <Compile Include="Fixtures.fs" />
+    <Compile Include="IoTests.fs" />
+    <Compile Include="GeometryTests.fs" />
+    <Compile Include="OrientTests.fs" />
+    <Compile Include="OrientStateTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeshOrient.Core\MeshOrient.Core.fsproj" />
+    <!-- OrientState is the app's whole state machine and touches neither
+         Avalonia nor GL, so the button sequence can be tested headlessly. -->
+    <ProjectReference Include="..\MeshOrient.App\MeshOrient.App.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- frame2solid's synthetic scan is the fixture: a mock frame with known
+         dimensions and deliberate scan defects. Sharing it means meshorient
+         and f2s can be measured against the same object. -->
+    <Content Include="..\..\synthetic_frame_scan.stl">
+      <Link>synthetic_frame_scan.stl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
