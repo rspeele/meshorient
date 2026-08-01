@@ -34,6 +34,13 @@ type GlView(state : OrientState) as this =
     /// has to happen inside a render callback, where the context is current.
     let mutable meshDirty = false
     let mutable overlayDirty = true
+    /// FLATTEN preview highlights: captured faces (green) and enclaves
+    /// (yellow). Rebuilt when the state's preview stamp moves — a parameter
+    /// tweak or pick edit — never per frame. Region-sized, so the rebuild is
+    /// milliseconds even on an 800k-triangle scan.
+    let mutable previewGreen = Scene.empty
+    let mutable previewYellow = Scene.empty
+    let mutable previewStampSeen = -1
 
     let mutable orbit = defaultOrbit
 
@@ -49,6 +56,8 @@ type GlView(state : OrientState) as this =
     let bgFree = Vector3(0.10f, 0.11f, 0.13f)
     let meshColour = Vector3(0.78f, 0.79f, 0.82f)
     let pickColour = Vector3(0.95f, 0.22f, 0.18f)
+    let capturedColour = Vector3(0.30f, 0.78f, 0.38f)
+    let enclaveColour = Vector3(0.93f, 0.83f, 0.20f)
 
     let pixelSize () =
         let scaling =
@@ -186,9 +195,14 @@ type GlView(state : OrientState) as this =
             Scene.disposeBuffer gl meshBuf
             Scene.disposeBuffer gl sphereBuf
             Scene.disposeBuffer gl overlayBuf
+            Scene.disposeBuffer gl previewGreen
+            Scene.disposeBuffer gl previewYellow
             meshBuf <- Scene.empty
             sphereBuf <- Scene.empty
             overlayBuf <- Scene.empty
+            previewGreen <- Scene.empty
+            previewYellow <- Scene.empty
+            previewStampSeen <- -1
             Scene.disposePrograms gl p
             programs <- ValueNone
         | ValueNone -> ()
@@ -210,6 +224,18 @@ type GlView(state : OrientState) as this =
             Scene.disposeBuffer gl overlayBuf
             overlayBuf <- Scene.makeLineBuffer gl (buildOverlay ())
             overlayDirty <- false
+
+        if previewStampSeen <> state.PreviewStamp then
+            Scene.disposeBuffer gl previewGreen
+            Scene.disposeBuffer gl previewYellow
+            previewGreen <- Scene.empty
+            previewYellow <- Scene.empty
+            match state.Mesh, state.PreviewFaces with
+            | Some m, Some (captured, enclaves) ->
+                previewGreen <- Scene.makeLitBuffer gl (Scene.subsetVertices m captured)
+                previewYellow <- Scene.makeLitBuffer gl (Scene.subsetVertices m enclaves)
+            | _ -> ()
+            previewStampSeen <- state.PreviewStamp
 
         let scaling, fbW, fbH = pixelSize ()
         let panels = this.Panels
@@ -243,6 +269,16 @@ type GlView(state : OrientState) as this =
                 let aspect = float32 (float pw / float ph)
                 let view, proj = matricesFor panel.Kind aspect
                 Scene.drawLit gl progs meshBuf model view proj meshColour
+
+                // Flatten preview: the captured region in green, enclaves in
+                // yellow, floated just off the surface with a polygon offset
+                // so they read as paint rather than z-fighting with the mesh.
+                if previewGreen.VertexCount > 0 || previewYellow.VertexCount > 0 then
+                    gl.Enable EnableCap.PolygonOffsetFill
+                    gl.PolygonOffset(-1.0f, -1.0f)
+                    Scene.drawLit gl progs previewGreen model view proj capturedColour
+                    Scene.drawLit gl progs previewYellow model view proj enclaveColour
+                    gl.Disable EnableCap.PolygonOffsetFill
 
                 for centre in state.MarkersWorld do
                     let m =

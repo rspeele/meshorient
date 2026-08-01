@@ -16,6 +16,8 @@
     <Compile Include="GeometryTests.fs" />
     <Compile Include="OrientTests.fs" />
     <Compile Include="OrientStateTests.fs" />
+    <Compile Include="ParamStepTests.fs" />
+    <Compile Include="FlattenTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

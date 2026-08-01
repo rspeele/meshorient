@@ -152,7 +152,7 @@ type OrientStateTests () =
         s.ApplyRotation(Mat3.rotDegrees 1 33.0)
         let moved = Bounds.size s.Bounds
         Assert.IsTrue(abs (moved.X - before.X) > 1.0, "the rotation should have changed the bbox")
-        s.Undo()
+        s.Undo() |> ignore
         let back = Bounds.size s.Bounds
         Assert.AreEqual(before.X, back.X, 1e-9, "X restored")
         Assert.AreEqual(before.Z, back.Z, 1e-9, "Z restored")

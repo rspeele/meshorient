@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="Camera.fs" />
+    <Compile Include="ParamStep.fs" />
     <Compile Include="Scene.fs" />
     <Compile Include="OrientState.fs" />
     <Compile Include="GlView.fs" />

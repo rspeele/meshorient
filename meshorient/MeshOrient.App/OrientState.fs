@@ -22,8 +22,15 @@ open MeshOrient.Core
 
 /// A picked point, in MODEL space. The surface normal comes along so the
 /// marker can be nudged clear of the face it sits on instead of z-fighting
-/// with it.
-type Pick = { Point : Vec3; Normal : Vec3 }
+/// with it; the triangle index is the seed FLATTEN floods from.
+type Pick = { Point : Vec3; Normal : Vec3; Triangle : int }
+
+/// One reversible step. Rigid transforms store the nine numbers they replace;
+/// a flatten stores only the vertices it moved (region-sized, so a deep stack
+/// of them stays cheap — snapshotting the whole 2.4M-vert array would not).
+type private UndoEntry =
+    | Rigid of Mat3 * Vec3
+    | Reshape of (int * Vec3)[]
 
 /// The axis SQUARE targets and STRAIGHTEN rotates about. Hard-coded to Y
 /// (across the frame) — the core functions both take an axis index, so
@@ -38,7 +45,20 @@ type OrientState() =
     let mutable rotation = Mat3.identity
     let mutable offset = Vec3.zero
     let mutable bounds = Bounds.empty
-    let undo = System.Collections.Generic.Stack<Mat3 * Vec3>()
+    let undo = System.Collections.Generic.Stack<UndoEntry>()
+
+    // FLATTEN state. Adjacency is the exact-bit weld + face graph — built on
+    // the first preview, cached for the life of the mesh (moving verts never
+    // changes the topology it encodes). The preview is entirely MODEL-space,
+    // so rotations do not invalidate it; only pick edits and parameter edits
+    // do, which is what the version counters track.
+    let mutable adjacency : Flatten.Adjacency option = None
+    let mutable preview : Flatten.Preview option = None
+    let mutable previewParams = (nan, nan)
+    let mutable previewPicksVersion = -1
+    let mutable picksVersion = 0
+    let mutable previewStamp = 0
+    let mutable flattenedVerts = 0            // lifetime total, for the export note
 
     // Picks live in MODEL space, not world space. That means a re-orientation
     // carries them along for free: press SQUARE twice and the second reading
@@ -46,6 +66,13 @@ type OrientState() =
     // on. f2s has to do this by hand (`level_pts` are rewritten through every
     // transform); here it falls out of the representation.
     let picks = ResizeArray<Pick>()
+
+    let picksChanged () = picksVersion <- picksVersion + 1
+
+    let dropPreview () =
+        if preview.IsSome then
+            preview <- None
+            previewStamp <- previewStamp + 1
 
     let reframe () =
         match mesh with
@@ -109,14 +136,18 @@ type OrientState() =
         rotation <- Mat3.identity
         offset <- Vec3.zero
         picks.Clear()
+        picksChanged ()
         undo.Clear()
+        adjacency <- None
+        dropPreview ()
+        flattenedVerts <- 0
         recentre ()
         m
 
     // --------------------------------------------------------- transforms
 
-    member private _.PushUndo() =
-        undo.Push(rotation, offset)
+    member private _.PushUndo(entry : UndoEntry) =
+        undo.Push entry
         // A handful of steps is all anyone backtracks; unbounded growth on a
         // long session is not worth the memory.
         while undo.Count > 32 do undo.Pop() |> ignore
@@ -125,22 +156,39 @@ type OrientState() =
     /// re-centre. Picks are untouched: they are model-space, so they follow.
     member this.ApplyRotation(r : Mat3) =
         if mesh.IsSome then
-            this.PushUndo()
+            this.PushUndo(Rigid(rotation, offset))
             rotation <- Mat3.mul r rotation
             recentre ()
 
-    member this.Undo() =
-        if undo.Count > 0 then
-            let r, o = undo.Pop()
-            rotation <- r
-            offset <- o
-            reframe ()
+    /// Returns true when the mesh's VERTICES changed (a flatten was undone),
+    /// so the caller knows the GPU copy is stale — a rigid undo only moves
+    /// the model matrix and costs nothing.
+    member this.Undo() : bool =
+        if undo.Count = 0 then false
+        else
+            match undo.Pop() with
+            | Rigid(r, o) ->
+                rotation <- r
+                offset <- o
+                reframe ()
+                false
+            | Reshape old ->
+                match mesh with
+                | None -> false
+                | Some m ->
+                    let verts = Array.copy m.Vertices
+                    for (i, pos) in old do verts[i] <- pos
+                    mesh <- Some { m with Vertices = verts }
+                    flattenedVerts <- max 0 (flattenedVerts - old.Length)
+                    dropPreview ()
+                    reframe ()
+                    true
 
     member this.AutoOrient() =
         match mesh with
         | None -> ()
         | Some m ->
-            this.PushUndo()
+            this.PushUndo(Rigid(rotation, offset))
             // PCA is a property of the mesh as it sits in MODEL space, so it
             // replaces the accumulated rotation rather than composing onto it.
             // Composing would mean pressing the button twice moved the model
@@ -150,7 +198,7 @@ type OrientState() =
 
     member this.Recentre() =
         if mesh.IsSome then
-            this.PushUndo()
+            this.PushUndo(Rigid(rotation, offset))
             recentre ()
 
     // -------------------------------------------------------------- picks
@@ -175,7 +223,8 @@ type OrientState() =
         match this.Trace ray with
         | None -> None
         | Some hit ->
-            picks.Add { Point = hit.Point; Normal = hit.Normal }
+            picks.Add { Point = hit.Point; Normal = hit.Normal; Triangle = hit.Triangle }
+            picksChanged ()
             Some(Mat3.apply rotation hit.Point + offset)
 
     /// Remove whichever pick is nearest where this ray hits the mesh.
@@ -193,9 +242,13 @@ type OrientState() =
                 let d = Vec3.lengthSq (Mat3.apply rotation picks[i].Point + offset - world)
                 if d < bestD then bestD <- d; best <- i
             picks.RemoveAt best
+            picksChanged ()
             true
 
-    member _.ClearPicks() = picks.Clear()
+    member _.ClearPicks() =
+        picks.Clear()
+        picksChanged ()
+        dropPreview ()
 
     // ------------------------------------------------------- the two moves
 
@@ -245,7 +298,93 @@ type OrientState() =
             let r = Orient.straightenAbout lockedAxis world
             $"%d{world.Length} picks · {sq} · STRAIGHTEN %.3f{r.AngleDegrees}° (±%.3f{r.RmsMm} mm)"
 
+    // ------------------------------------------------------------ flatten
+
+    /// Bumped every time the preview appears, changes or vanishes — the GL
+    /// view compares it to know when its highlight buffers are stale.
+    member _.PreviewStamp = previewStamp
+
+    member _.Preview = preview
+
+    /// (captured, enclave) face lists for the highlight overlay.
+    member _.PreviewFaces =
+        preview |> Option.map (fun pv -> pv.CapturedFaces, pv.EnclaveFaces)
+
+    member _.CanFlatten = mesh.IsSome && picks.Count >= 3
+
+    /// True when the shown preview matches these parameters AND the picks it
+    /// was computed from — i.e. pressing Update would change nothing. The
+    /// window greys the button on this.
+    member _.PreviewIsCurrent(floorMm : float, ceilingMm : float) =
+        match preview with
+        | None -> false
+        | Some _ ->
+            let (pf, pc) = previewParams
+            previewPicksVersion = picksVersion
+            && abs (pf - floorMm) < 1e-12 && abs (pc - ceilingMm) < 1e-12
+
+    /// Suggested noise floor: 3x the plane-fit RMS of the picks — the scan's
+    /// own noise, measured off the very points the user just placed.
+    member this.SuggestedFloor : float option =
+        if picks.Count < 3 then None
+        else
+            let rms = (Geometry.fitPlane (this.PicksWorld)).Rms
+            Some(max 0.01 (3.0 * rms))
+
+    /// Compute (or refresh) the preview. Pure with respect to the mesh —
+    /// nothing moves until ApplyFlatten.
+    member this.ComputeFlattenPreview(floorMm : float, ceilingMm : float)
+            : Result<Flatten.Preview, string> =
+        match mesh with
+        | None -> Error "Load a scan first."
+        | Some m ->
+            if picks.Count < 3 then
+                Error $"FLATTEN needs 3 or more points on the flat (%d{picks.Count} picked)."
+            elif ceilingMm <= 0.0 then
+                Error "The ceiling must be a positive distance in mm."
+            else
+                let adj =
+                    match adjacency with
+                    | Some a -> a
+                    | None ->
+                        let a = Flatten.buildAdjacency m
+                        adjacency <- Some a
+                        a
+                let seeds = picks |> Seq.map (fun p -> p.Triangle) |> Seq.distinct |> Seq.toArray
+                let pts = picks |> Seq.map (fun p -> p.Point) |> Seq.toArray
+                let hint = picks |> Seq.fold (fun acc p -> acc + p.Normal) Vec3.zero
+                let pv =
+                    Flatten.preview m adj seeds pts hint
+                        { Flatten.defaults with FloorMm = floorMm; CeilingMm = ceilingMm }
+                preview <- Some pv
+                previewParams <- (floorMm, ceilingMm)
+                previewPicksVersion <- picksVersion
+                previewStamp <- previewStamp + 1
+                Ok pv
+
+    /// Commit the shown preview. Picks are KEPT — re-running the same flat at
+    /// a different ceiling is the common follow-up, and clearing is one click.
+    member this.ApplyFlatten() : Result<Flatten.Preview, string> =
+        match mesh, preview with
+        | _, None -> Error "Nothing to apply — press FLATTEN to preview first."
+        | None, _ -> Error "Load a scan first."
+        | Some m, Some pv ->
+            let flattened, undoData = Flatten.apply m pv
+            mesh <- Some flattened
+            this.PushUndo(Reshape undoData)
+            flattenedVerts <- flattenedVerts + pv.MovedVertexCount
+            dropPreview ()
+            reframe ()
+            Ok pv
+
+    member _.DiscardPreview() = dropPreview ()
+
     // ------------------------------------------------------------- export
+
+    /// Verts moved by flattens still baked into the current mesh. When this
+    /// is non-zero the export is no longer a pure rigid transform of the scan
+    /// and the status message must stop claiming it is.
+    member _.FlattenedVertexCount = flattenedVerts
 
     member _.ExportOrientedStl() : string =
         match mesh with

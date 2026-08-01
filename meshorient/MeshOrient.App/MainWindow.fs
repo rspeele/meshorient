@@ -56,6 +56,39 @@ type MainWindow() as this =
         if not (isNull btSquare) then btSquare.IsEnabled <- state.CanSquare
         if not (isNull btStraighten) then btStraighten.IsEnabled <- state.CanStraighten
 
+    // ------------------------------------------------------------- flatten
+
+    // The two parameter boxes. Values are millimetres; the textbox is the
+    // source of truth (each arrow press parses, steps, reformats), and the
+    // preview recomputes ONLY on discrete gestures — arrow press, tab-out,
+    // Enter, an explicit button, or a pick edit. Never on a drag: a slider
+    // that recomputes per pixel of travel is exactly the misfeature this
+    // layout exists to avoid.
+    let tbFloor = TextBox(Width = 64.0, Margin = Thickness(4.0, 0.0, 10.0, 0.0),
+                          FontSize = 12.0, Watermark = "auto")
+    let tbCeiling = TextBox(Width = 64.0, Text = "0.3",
+                            Margin = Thickness(4.0, 0.0, 10.0, 0.0), FontSize = 12.0)
+    let mutable btFlatten : Button = null
+    let mutable btApply : Button = null
+    let mutable btDiscard : Button = null
+
+    let parsedParams () =
+        match ParamStep.parse tbFloor.Text, ParamStep.parse tbCeiling.Text with
+        | Some f, Some c when c > 0.0 -> Some(f, c)
+        | _ -> None
+
+    let refreshFlattenBar () =
+        let current =
+            match parsedParams () with
+            | Some(f, c) -> state.PreviewIsCurrent(f, c)
+            | None -> false
+        if not (isNull btFlatten) then
+            btFlatten.IsEnabled <- state.CanFlatten && not current
+        if not (isNull btApply) then
+            btApply.IsEnabled <- current
+        if not (isNull btDiscard) then
+            btDiscard.IsEnabled <- state.Preview.IsSome
+
     let refreshCaptions () =
         let panels = panelLayout view.Bounds.Width view.Bounds.Height
         for kind, t in captions do
@@ -72,6 +105,7 @@ type MainWindow() as this =
         view.InvalidateOverlay()
         refreshFit ()
         refreshEnabled ()
+        refreshFlattenBar ()
         refreshCaptions ()
 
     let button (label : string) (tip : string) (handler : unit -> unit) =
@@ -128,10 +162,80 @@ type MainWindow() as this =
             setStatus $"Straightened: spun %.3f{r.AngleDegrees}° about Y so the picked face is level. Points were collinear to ±%.3f{r.RmsMm} mm. The Y squaring is untouched — rotating about Y is the only move that leaves it alone."
 
     let doUndo () =
-        state.Undo()
+        if state.Undo() then view.InvalidateMesh()
         view.FrameCamera()
         refresh ()
         setStatus "Undone."
+
+    let previewStatus (pv : MeshOrient.Core.Flatten.Preview) =
+        let enc = if pv.EnclaveCount > 0 then $" · %d{pv.EnclaveCount} enclave(s) in YELLOW — inspect them"
+                  else ""
+        $"Preview: would flatten %d{pv.MovedVertexCount} verts across %d{pv.Islands} island(s) · RMS %.3f{pv.RmsBeforeMm} → %.3f{pv.RmsAfterMm} mm · max move %.3f{pv.MaxMoveMm} mm{enc}. Tweak floor/ceiling and APPLY when it looks right."
+
+    /// Compute or refresh the preview from the boxes. The floor box pre-fills
+    /// from the picks' own plane-fit RMS the first time — the scan's measured
+    /// noise, not a guess — and is never overwritten once the user has typed.
+    let doFlattenPreview () =
+        if String.IsNullOrWhiteSpace tbFloor.Text then
+            match state.SuggestedFloor with
+            | Some f -> tbFloor.Text <- ParamStep.format f
+            | None -> ()
+        match parsedParams () with
+        | None -> setStatus "Floor and ceiling must be numbers (mm), ceiling > 0."
+        | Some(f, c) ->
+            match state.ComputeFlattenPreview(f, c) with
+            | Error msg -> setStatus msg
+            | Ok pv ->
+                refresh ()
+                setStatus (previewStatus pv)
+
+    /// Re-preview after a discrete gesture, but only when a preview session
+    /// is actually live — tweaking boxes before ever pressing FLATTEN does
+    /// nothing, which is what makes the boxes safe to explore.
+    let syncPreview () =
+        if state.Preview.IsSome then
+            if state.Picks.Count >= 3 then doFlattenPreview ()
+            else
+                state.DiscardPreview()
+                refresh ()
+                setStatus "Preview discarded — fewer than 3 picks left."
+        else refreshFlattenBar ()
+
+    let doApplyFlatten () =
+        match state.ApplyFlatten() with
+        | Error msg -> setStatus msg
+        | Ok pv ->
+            view.InvalidateMesh()
+            refresh ()
+            setStatus $"Flattened %d{pv.MovedVertexCount} verts (max move %.3f{pv.MaxMoveMm} mm, RMS now %.3f{pv.RmsAfterMm} mm). Picks kept — re-preview with new numbers, or Clear picks. Undo reverses this."
+
+    let doDiscardPreview () =
+        if state.Preview.IsSome then
+            state.DiscardPreview()
+            refresh ()
+            setStatus "Preview discarded. Nothing was changed."
+
+    /// Wire one parameter box: focus selects all, Up/Down arrow steps
+    /// (linear above 0.1 mm, halving/doubling below), Enter and tab-out
+    /// re-preview if anything changed.
+    let wireParamBox (tb : TextBox) =
+        tb.GotFocus.Add(fun _ ->
+            Avalonia.Threading.Dispatcher.UIThread.Post(fun () -> tb.SelectAll()))
+        tb.KeyDown.Add(fun e ->
+            match e.Key with
+            | Key.Up | Key.Down ->
+                e.Handled <- true
+                match ParamStep.stepText (e.Key = Key.Up) tb.Text with
+                | Some t ->
+                    tb.Text <- t
+                    tb.SelectAll()
+                    syncPreview ()
+                | None -> ()
+            | Key.Enter ->
+                e.Handled <- true
+                syncPreview ()
+            | _ -> ())
+        tb.LostFocus.Add(fun _ -> syncPreview ())
 
     let doClearPicks () =
         state.ClearPicks()
@@ -143,7 +247,12 @@ type MainWindow() as this =
         else
             try
                 let out = state.ExportOrientedStl()
-                setStatus $"Wrote {out} — the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned."
+                let fidelity =
+                    if state.FlattenedVertexCount > 0 then
+                        $"the same {state.TriangleCount} triangles, rigidly transformed, with %d{state.FlattenedVertexCount} verts flattened onto their planes"
+                    else
+                        $"the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned"
+                setStatus $"Wrote {out} — {fidelity}."
             with e ->
                 setStatus $"Export failed: {e.Message}"
 
@@ -196,6 +305,39 @@ type MainWindow() as this =
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
         toolbar.Children.Add(button "Export oriented STL" "Write <name>_oriented.stl beside the source" doExport)
 
+        // ---- flatten bar: its own row so the preview loop reads as one unit
+        let label (text : string) =
+            TextBlock(Text = text, VerticalAlignment = VerticalAlignment.Center,
+                      FontSize = 12.0, Margin = Thickness(0.0, 0.0, 2.0, 0.0),
+                      Foreground = SolidColorBrush(Color.FromRgb(0x9Auy, 0xA4uy, 0xB0uy)))
+        btFlatten <- button "FLATTEN (preview)"
+                        ("Flood-fill the flat under your picks and PREVIEW the snap: captured faces green, "
+                         + "surrounded-but-not-captured pockets yellow. Nothing moves until APPLY.")
+                        doFlattenPreview
+        btApply <- button "APPLY"
+                       "Commit the previewed flatten to the mesh (Undo reverses it)"
+                       doApplyFlatten
+        btDiscard <- button "Discard"
+                         "Drop the preview without changing anything (Esc)"
+                         doDiscardPreview
+        wireParamBox tbFloor
+        wireParamBox tbCeiling
+        ToolTip.SetTip(tbFloor,
+            "Noise floor, mm: distances up to this snap fully. Pre-fills from your picks' "
+            + "plane-fit RMS ×3. ↑/↓ steps ±0.1 above 0.1, halves/doubles below.")
+        ToolTip.SetTip(tbCeiling,
+            "Ceiling, mm: the capture limit k. The snap feathers to zero approaching it, "
+            + "so curves stay smooth. ↑/↓ steps ±0.1 above 0.1, halves/doubles below.")
+        let flattenBar = StackPanel(Orientation = Orientation.Horizontal,
+                                    Margin = Thickness(10.0, 0.0, 10.0, 8.0))
+        flattenBar.Children.Add btFlatten
+        flattenBar.Children.Add(label "floor mm")
+        flattenBar.Children.Add tbFloor
+        flattenBar.Children.Add(label "ceiling mm")
+        flattenBar.Children.Add tbCeiling
+        flattenBar.Children.Add btApply
+        flattenBar.Children.Add btDiscard
+
         // OpenGlControlBase has no Background, so Avalonia's hit-tester treats
         // it as transparent no matter what is in the framebuffer. The Border
         // is what actually receives the pointer.
@@ -215,13 +357,16 @@ type MainWindow() as this =
 
         let root = Grid()
         root.RowDefinitions.Add(RowDefinition(GridLength.Auto))
+        root.RowDefinitions.Add(RowDefinition(GridLength.Auto))
         root.RowDefinitions.Add(RowDefinition(GridLength(1.0, GridUnitType.Star)))
         root.RowDefinitions.Add(RowDefinition(GridLength.Auto))
         Grid.SetRow(toolbar, 0)
         root.Children.Add toolbar
-        Grid.SetRow(glHost, 1)
+        Grid.SetRow(flattenBar, 1)
+        root.Children.Add flattenBar
+        Grid.SetRow(glHost, 2)
         root.Children.Add glHost
-        Grid.SetRow(bottom, 2)
+        Grid.SetRow(bottom, 3)
         root.Children.Add bottom
         this.Content <- root
 
@@ -245,7 +390,8 @@ type MainWindow() as this =
                     else 1
                 if view.HandlePress(p.Position, button) then
                     refresh ()
-                    setStatus $"Pick removed — %d{state.Picks.Count} left."))
+                    setStatus $"Pick removed — %d{state.Picks.Count} left."
+                    syncPreview ()))
 
         glHost.PointerMoved.Add(fun e ->
             guarded "Drag" (fun () -> view.HandleMove((e.GetCurrentPoint glHost).Position)))
@@ -256,11 +402,19 @@ type MainWindow() as this =
                 | Some world ->
                     refresh ()
                     setStatus $"Point %d{state.Picks.Count} at X %.2f{world.X}, Y %.2f{world.Y}, Z %.2f{world.Z}."
+                    // A pick click is as deliberate a gesture as an arrow
+                    // press: a live preview follows it rather than lying.
+                    syncPreview ()
                 | None -> ()))
 
         glHost.PointerWheelChanged.Add(fun e ->
             guarded "Zoom" (fun () ->
                 view.HandleWheel((e.GetCurrentPoint glHost).Position, e.Delta.Y)))
+
+        this.KeyDown.Add(fun e ->
+            if e.Key = Key.Escape then
+                e.Handled <- true
+                doDiscardPreview ())
 
         // Captions have to follow the panels, and the panels are laid out from
         // the control's size, so re-place them whenever that changes.

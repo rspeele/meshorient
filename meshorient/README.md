@@ -114,13 +114,62 @@ stops anyone "fixing" this later.
 Re-squaring invalidates a previous straighten, so do them in that order — but
 nothing stops you going back and forth.
 
+## FLATTEN — de-noise a flat face onto its true plane
+
+Scan noise on a face you know is flat (a slide flat, a frame wall) can be
+removed here instead of eyeballed in Blender: pick 3+ points on the flat as
+usual, press **FLATTEN (preview)**, inspect, tweak, **APPLY**.
+
+The naive "snap everything within k of the plane" fails two ways, and the
+implementation exists to avoid both:
+
+- **Flood fill, not the infinite plane.** The snap only reaches faces
+  connected to your picks, walking face-to-face, so geometry elsewhere that
+  happens to intersect the plane is never touched. The walk is gated by
+  surface normal (within 30° of the plane, orientation-agnostic — scan
+  winding is not trustworthy) as well as by distance, which is what stops it
+  smearing a skirt up the base of every adjoining wall. Every pick seeds its
+  own island: for Glock-style serrations, put one pick per serration flat and
+  all of them flatten to the single common plane in one operation.
+- **Feathering in distance space, not perimeter space.** Snap strength is a
+  smoothstep of each vertex's own |distance|: full inside the `floor` (the
+  noise band), fading to zero at the `ceiling` (k). A true flat — including
+  one ending at a sharp box edge — sits entirely inside the noise band, so it
+  snaps at full strength right up to the arris. A gentle curve leaves the
+  band smoothly, so the correction fades smoothly instead of printing a
+  crease at the k-boundary. Measured on the fillet fixture: the hard snap
+  kinks 6× worse than the feathered one.
+
+**Preview before commit.** Captured faces highlight **green** in all four
+panels. Pockets completely surrounded by the capture but not part of it
+highlight **yellow** — enclaves. A yellow patch is either a genuine feature
+(leave it), a spot the normal gate rejected (raise the floor), or a dent
+deeper than the ceiling; the point is that it is never invisible. The status
+line reports verts, islands, RMS before → after, max move, and enclave count.
+Nothing moves until APPLY; Esc or Discard drops the preview; Undo reverses an
+apply exactly.
+
+**The two boxes.** `floor` pre-fills from your picks' plane-fit RMS ×3 — the
+scan's measured noise — and `ceiling` defaults to 0.3 mm. Arrow keys step
+±0.1 mm above 0.1 and halve/double below it (0.21 → 0.11 → 0.055 → 0.0275,
+and exactly back up); the preview recomputes on arrow press, Enter, tab-out,
+the button, or a pick edit — never on a drag, and the button greys when the
+shown preview is already current. The plane itself is refined from the whole
+captured region (IRLS), so the picks only need to be roughly placed.
+
+The plane is fitted wherever the face lies — flattening neither requires nor
+disturbs SQUARE. Run it after SQUARE and the face becomes a true Y = const
+datum. After an APPLY the export message stops claiming "nothing resampled"
+and says how many verts were flattened instead.
+
 ## Build
 
 - `MeshOrient.Core` — all the maths. Mesh I/O, eigen/plane/line fitting, PCA,
-  ray-mesh intersection, the alignment moves. No Avalonia and no GL: that
-  is what makes every measurement testable without a window.
+  ray-mesh intersection, the alignment moves, and the flatten flood
+  (exact-bit weld + face adjacency, cached per mesh). No Avalonia and no GL:
+  that is what makes every measurement testable without a window.
 - `MeshOrient.App` — Avalonia 12 + Silk.NET.OpenGL. Same stack as CNCFlow.UI.
-- `MeshOrient.Core.Tests` — MSTest, 42 tests, run with `dotnet test`.
+- `MeshOrient.Core.Tests` — MSTest, 56 tests, run with `dotnet test`.
 
 One `OpenGlControlBase` with four `glViewport` passes, not four GL controls:
 each Avalonia GL control owns its own context, so a 760k-triangle scan would
@@ -155,6 +204,17 @@ The load-bearing ones:
   between them called `straightenAbout` with one point, which throws, and an
   exception on the pick path took the window down. One click on a freshly
   loaded scan was enough to kill it.
+- **FLATTEN's two fixes, as A/B tests.** A noisy box top flattens with its
+  arris exactly on the plane and its wall untouched to the last bit; a
+  flat-into-fillet strip flattened with the hard snap kinks 6× worse than
+  with the feathering (0.19 vs 0.03 mm). A wall fixture with a boss, a rib, a
+  through-window and a perpendicular flange floods in 70 ms and reports
+  exactly two enclaves — the boss and the rib, never the window or flange.
+- **The synthetic is cracked**, which these tests discovered: make_synthetic
+  jitters each quad's vertex copies independently, so it cannot host a flood.
+  It stays as the hostile-mesh fixture (adjacency must survive its cracks and
+  holes); flood tests run on indexed fixtures round-tripped through real STL,
+  which is what MeshMixer output actually looks like.
 - **The full run**, in `OrientStateTests`: load a deliberately crooked scan,
   auto-orient, pick four wall points, Square twice (0.291° → 0.0000°), export,
   re-import and confirm the written STL is already square.

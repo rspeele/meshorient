@@ -15,6 +15,7 @@
     <Compile Include="Geometry.fs" />
     <Compile Include="Raycast.fs" />
     <Compile Include="Orient.fs" />
+    <Compile Include="Flatten.fs" />
   </ItemGroup>
 
 </Project>
