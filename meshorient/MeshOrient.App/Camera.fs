@@ -128,7 +128,10 @@ type Orbit =
         Distance : float32
         Yaw : float32
         Pitch : float32
-        FovY : float32 }
+        FovY : float32
+        /// Numpad-5, Blender style. Ortho sizes itself from Distance so the
+        /// apparent zoom does not jump when toggling.
+        Orthographic : bool }
 
 let defaultOrbit =
     {   Target = Vector3.Zero
@@ -138,7 +141,8 @@ let defaultOrbit =
         // already turned toward you, so the two views agree at a glance.
         Yaw = MathF.PI * -0.20f
         Pitch = MathF.PI * 0.12f
-        FovY = MathF.PI * 0.25f }
+        FovY = MathF.PI * 0.25f
+        Orthographic = false }
 
 /// Frame the orbit camera on a model: centre on it and back off far enough
 /// that the whole thing fits the vertical field of view.
@@ -155,12 +159,26 @@ let eyePosition (c : Orbit) =
 
 let orbitMatrices (c : Orbit) (aspect : float32) =
     let eye = eyePosition c
-    let view = Matrix4x4.CreateLookAt(eye, c.Target, Vector3(0.0f, 0.0f, 1.0f))
+    // Up is the TANGENT of the orbit sphere, not a constant world-up: at
+    // ordinary pitches LookAt orthonormalises both to the identical basis,
+    // but a constant (0,0,1) degenerates when a numpad-7 preset puts the
+    // camera exactly at the pole, and the tangent never does.
+    let cosP, sinP = MathF.Cos c.Pitch, MathF.Sin c.Pitch
+    let cosY, sinY = MathF.Cos c.Yaw, MathF.Sin c.Yaw
+    let up = Vector3(-sinP * cosY, -sinP * sinY, cosP)
+    let view = Matrix4x4.CreateLookAt(eye, c.Target, up)
     // Near/far scale with distance so a big scan and a small one both get
     // usable depth precision without any per-model tuning.
+    let near = max 0.05f (c.Distance * 0.01f)
+    let far = c.Distance * 10.0f
     let proj =
-        Matrix4x4.CreatePerspectiveFieldOfView(
-            c.FovY, aspect, max 0.05f (c.Distance * 0.01f), c.Distance * 10.0f)
+        if c.Orthographic then
+            // Sized to the perspective frustum's height at the target, so
+            // numpad-5 swaps projection without a zoom jump.
+            let h = 2.0f * c.Distance * MathF.Tan(c.FovY * 0.5f)
+            Matrix4x4.CreateOrthographic(h * aspect, h, near, far)
+        else
+            Matrix4x4.CreatePerspectiveFieldOfView(c.FovY, aspect, near, far)
     view, proj
 
 /// Pitch is clamped short of the poles: passing straight over the top makes

@@ -51,10 +51,12 @@ type MainWindow() as this =
     /// pick count. A button that is offered must be a button that works.
     let mutable btSquare : Button = null
     let mutable btStraighten : Button = null
+    let mutable btCenterline : Button = null
 
     let refreshEnabled () =
         if not (isNull btSquare) then btSquare.IsEnabled <- state.CanSquare
         if not (isNull btStraighten) then btStraighten.IsEnabled <- state.CanStraighten
+        if not (isNull btCenterline) then btCenterline.IsEnabled <- state.CanCenterline
 
     // ------------------------------------------------------------- flatten
 
@@ -151,7 +153,7 @@ type MainWindow() as this =
         | Ok r ->
             view.FrameCamera()
             refresh ()
-            setStatus $"Squared: rotated %.3f{r.TiltDegrees}° so the picked face is perpendicular to Y. Your %d{state.Picks.Count} points were coplanar to ±%.3f{r.RmsMm} mm — that is the scan's own flatness. Next: Clear picks, then pick a flat top face and press STRAIGHTEN."
+            setStatus $"Oriented to side: rotated %.3f{r.TiltDegrees}° so the picked face is perpendicular to Y. Your %d{state.Picks.Count} points were coplanar to ±%.3f{r.RmsMm} mm — that is the scan's own flatness. Next: Clear picks, then pick a flat top face and press Y-Spin Face to Level."
 
     let doStraighten () =
         match state.ApplyStraighten() with
@@ -160,6 +162,14 @@ type MainWindow() as this =
             view.FrameCamera()
             refresh ()
             setStatus $"Straightened: spun %.3f{r.AngleDegrees}° about Y so the picked face is level. Points were collinear to ±%.3f{r.RmsMm} mm. The Y squaring is untouched — rotating about Y is the only move that leaves it alone."
+
+    let doYCenterline () =
+        match state.ApplyYCenterline() with
+        | Error msg -> setStatus msg
+        | Ok r ->
+            view.FrameCamera()
+            refresh ()
+            setStatus $"Centred: shifted Y by %+.3f{r.ShiftY} mm — the two picked faces now sit at ±%.3f{r.HalfWidth} mm about Y=0, ready to slice down the middle. Do this LAST: any later rotation re-centres on the bbox and undoes it."
 
     let doUndo () =
         if state.Undo() then view.InvalidateMesh()
@@ -246,13 +256,12 @@ type MainWindow() as this =
         if not state.HasMesh then setStatus "Load a scan first."
         else
             try
-                let out = state.ExportOrientedStl()
-                let fidelity =
-                    if state.FlattenedVertexCount > 0 then
-                        $"the same {state.TriangleCount} triangles, rigidly transformed, with %d{state.FlattenedVertexCount} verts flattened onto their planes"
-                    else
-                        $"the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned"
-                setStatus $"Wrote {out} — {fidelity}."
+                let oriented, cleaned = state.ExportStl()
+                match cleaned with
+                | Some c ->
+                    setStatus $"Wrote 2 files: {Path.GetFileName oriented} (orientation only — the scan untouched) and {Path.GetFileName c} (%d{state.FlattenedVertexCount} verts flattened). Same {state.TriangleCount} triangles in both."
+                | None ->
+                    setStatus $"Wrote {oriented} — the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned."
             with e ->
                 setStatus $"Export failed: {e.Message}"
 
@@ -291,26 +300,35 @@ type MainWindow() as this =
         toolbar.Children.Add(button "Flip" "Turn end for end (180° about Z)" (doRotate 2 180.0))
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
-        btSquare <- button "SQUARE"
+        btSquare <- button "Orient Face to Side"
                         "Square the picked face to Y — needs 3+ points on one flat SIDE face"
                         doSquare
-        btStraighten <- button "STRAIGHTEN"
+        btStraighten <- button "Y-Spin Face to Level"
                             "Spin about Y until the picked face is level — needs 2+ points on a flat TOP or BOTTOM face"
                             doStraighten
+        btCenterline <- button "Y-Centerline"
+                            ("Translate in Y so the two picked faces sit symmetric about Y=0 — pick point(s) on the "
+                             + "RIGHT face and on the LEFT face (extra picks per side average the noise out). "
+                             + "Do this last; rotations re-centre on the bbox.")
+                            doYCenterline
         toolbar.Children.Add btSquare
         toolbar.Children.Add btStraighten
+        toolbar.Children.Add btCenterline
         toolbar.Children.Add(button "Clear picks" "Drop every picked point" doClearPicks)
         toolbar.Children.Add(button "Undo" "Step back one orientation change" doUndo)
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
-        toolbar.Children.Add(button "Export oriented STL" "Write <name>_oriented.stl beside the source" doExport)
+        toolbar.Children.Add(button "Export STL"
+                                    ("Write <name>_oriented.stl (orientation only, never flattened) and, when flattens "
+                                     + "are applied, <name>_cleaned.stl (with them) beside the source")
+                                    doExport)
 
         // ---- flatten bar: its own row so the preview loop reads as one unit
         let label (text : string) =
             TextBlock(Text = text, VerticalAlignment = VerticalAlignment.Center,
                       FontSize = 12.0, Margin = Thickness(0.0, 0.0, 2.0, 0.0),
                       Foreground = SolidColorBrush(Color.FromRgb(0x9Auy, 0xA4uy, 0xB0uy)))
-        btFlatten <- button "FLATTEN (preview)"
+        btFlatten <- button "Flatten Face"
                         ("Flood-fill the flat under your picks and PREVIEW the snap: captured faces green, "
                          + "surrounded-but-not-captured pockets yellow. Nothing moves until APPLY.")
                         doFlattenPreview
@@ -411,10 +429,34 @@ type MainWindow() as this =
             guarded "Zoom" (fun () ->
                 view.HandleWheel((e.GetCurrentPoint glHost).Position, e.Delta.Y)))
 
+        // Blender-style numpad navigation for the 3D panel. Guarded so keys
+        // typed into a parameter box stay text entry: the routed event's
+        // Source is the focused control.
         this.KeyDown.Add(fun e ->
-            if e.Key = Key.Escape then
-                e.Handled <- true
-                doDiscardPreview ())
+            let inTextBox = (e.Source :? TextBox)
+            if not inTextBox then
+                let step = MathF.PI / 12.0f              // 15° per press, like Blender
+                match e.Key with
+                | Key.Escape -> e.Handled <- true; doDiscardPreview ()
+                // Presets. Blender muscle memory mapped onto this world
+                // (+X muzzle, +Z up, -Y the gun's right):
+                //   1 = camera on -Y  -> the gun's RIGHT (same as the R panel)
+                //   3 = camera on +X  -> muzzle-on
+                //   7 = top, +Y up on screen, exactly at the pole (the orbit
+                //       camera's tangent up-vector makes that legal)
+                | Key.NumPad1 -> e.Handled <- true; view.SetOrbitAngles(-MathF.PI / 2.0f, 0.0f)
+                | Key.NumPad3 -> e.Handled <- true; view.SetOrbitAngles(0.0f, 0.0f)
+                | Key.NumPad7 -> e.Handled <- true; view.SetOrbitAngles(-MathF.PI / 2.0f, MathF.PI / 2.0f)
+                | Key.NumPad9 -> e.Handled <- true; view.FlipOrbit()
+                | Key.NumPad4 -> e.Handled <- true; view.OrbitBy(step, 0.0f)
+                | Key.NumPad6 -> e.Handled <- true; view.OrbitBy(-step, 0.0f)
+                | Key.NumPad8 -> e.Handled <- true; view.OrbitBy(0.0f, step)
+                | Key.NumPad2 -> e.Handled <- true; view.OrbitBy(0.0f, -step)
+                | Key.NumPad5 ->
+                    e.Handled <- true
+                    let ortho = view.ToggleProjection()
+                    setStatus (if ortho then "3D view: orthographic." else "3D view: perspective.")
+                | _ -> ())
 
         // Captions have to follow the panels, and the panels are laid out from
         // the control's size, so re-place them whenever that changes.
@@ -432,7 +474,7 @@ type MainWindow() as this =
             | f -> loadFrom f.Path.LocalPath)
 
         refreshEnabled ()
-        setStatus "Open a scan (or drag one in). Then: Auto-orient · pick 3+ on a flat SIDE face and press SQUARE · Clear picks · pick 2+ on a flat TOP face and press STRAIGHTEN · Export."
+        setStatus "Open a scan (or drag one in). Then: Auto-orient · pick 3+ on a flat SIDE face → Orient Face to Side · Clear picks · pick 2+ on a flat TOP face → Y-Spin Face to Level · Export STL."
 
     /// Load a file named on the command line, once the window exists.
     member _.LoadInitial(path : string) =

@@ -126,8 +126,10 @@ type OrientStateTests () =
                               $"a squared model must read square, got {again.TiltDegrees}")
 
             // Export, then check the written file is genuinely square by
-            // measuring it the same way f2s's test does.
-            let out = s.ExportOrientedStl()
+            // measuring it the same way f2s's test does. No flattens were
+            // applied, so there must be no _cleaned companion.
+            let out, cleaned = s.ExportStl()
+            Assert.IsTrue(cleaned.IsNone, "no flattens -> no _cleaned file")
             try
                 Assert.IsTrue(File.Exists out, "export should have written a file")
                 let back = MeshIO.load out
@@ -204,8 +206,8 @@ type OrientStateTests () =
             s.PickAt(rayFromRight x z) |> ignore
         let text = s.CurrentFit()
         printfn "readout: %s" text
-        Assert.IsTrue(text.Contains "SQUARE", "should say what SQUARE would do")
-        Assert.IsTrue(text.Contains "STRAIGHTEN", "should say what STRAIGHTEN would do")
+        Assert.IsTrue(text.Contains "to-side", "should say what Orient Face to Side would do")
+        Assert.IsTrue(text.Contains "y-spin", "should say what Y-Spin Face to Level would do")
         Assert.IsTrue(text.Contains "4 picks", "should say how many points there are")
 
     /// The readout runs on EVERY pick, including the first, so it has to
@@ -229,6 +231,39 @@ type OrientStateTests () =
             let (x, z) = probes[i]
             s.PickAt(rayFromRight x z) |> ignore
         Assert.IsTrue((s.CurrentFit()).Length > 0)
+
+    /// Y-Centerline through the state: pick one point on each wall of the
+    /// synthetic (right ~ +11, left ~ -11 — the frame is asymmetric, so the
+    /// bbox centring leaves the mid-plane genuinely off Y=0) and centre it.
+    [<TestMethod>]
+    member _.Y_centerline_translates_the_picked_faces_symmetric () =
+        let s = loaded ()
+        s.PickAt(rayFromRight 0.0 20.0) |> ignore
+        s.PickAt { Raycast.Origin = Vec3.create 0.0 -1000.0 20.0
+                   Raycast.Direction = Vec3.create 0.0 1.0 0.0 } |> ignore
+        Assert.IsTrue s.CanCenterline
+        match s.ApplyYCenterline() with
+        | Error e -> Assert.Fail e
+        | Ok r ->
+            printfn "centerline: shift %+.3f, faces at +-%.3f" r.ShiftY r.HalfWidth
+            Assert.IsTrue(abs r.ShiftY > 0.05, "the synthetic's mid-plane is off the bbox centre")
+            let w = s.PicksWorld
+            Assert.AreEqual(0.0, w[0].Y + w[1].Y, 1e-9, "picks must land symmetric about Y=0")
+            Assert.AreEqual(11.0, r.HalfWidth, 0.4, "the grip walls sit at +-11")
+        // And it is undoable like any rigid step.
+        Assert.IsFalse(s.Undo(), "a translation is rigid — no mesh change")
+
+    [<TestMethod>]
+    member _.Y_centerline_rejects_picks_all_on_one_face () =
+        let s = loaded ()
+        s.PickAt(rayFromRight 0.0 20.0) |> ignore
+        s.PickAt(rayFromRight 30.0 20.0) |> ignore
+        s.PickAt(rayFromRight -30.0 20.0) |> ignore
+        match s.ApplyYCenterline() with
+        | Ok _ -> Assert.Fail "three picks on one wall cannot define a centreline"
+        | Error msg ->
+            printfn "%s" msg
+            Assert.IsTrue(msg.Contains "1 group", $"should name the group count: {msg}")
 
     [<TestMethod>]
     member _.Marker_radius_scales_with_the_model () =

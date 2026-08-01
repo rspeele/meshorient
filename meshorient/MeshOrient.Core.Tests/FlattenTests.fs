@@ -395,6 +395,59 @@ type FlattenTests () =
         finally
             if File.Exists stl then File.Delete stl
 
+    /// Export STL writes BOTH truths: `_oriented` is the pristine scan
+    /// (flattens deliberately absent), `_cleaned` has them baked in. The
+    /// cleanup is never the price of the raw geometry.
+    [<TestMethod>]
+    member _.Export_writes_pristine_oriented_and_flattened_cleaned () =
+        let stl = Path.Combine(Path.GetTempPath(), $"meshorient_exp_{Guid.NewGuid():N}.stl")
+        MeshIO.saveStlBinary stl (FlattenFixtures.wall sigma)
+        let mutable toDelete = [ stl ]
+        try
+            let s = MeshOrient.App.OrientState()
+            s.Load stl |> ignore
+            for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
+                let o = s.Offset
+                s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
+                           Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
+            s.ComputeFlattenPreview(3.0 * sigma, 0.3) |> ignore
+            match s.ApplyFlatten() with
+            | Error e -> Assert.Fail e
+            | Ok _ -> ()
+
+            let oriented, cleaned = s.ExportStl()
+            Assert.IsTrue(cleaned.IsSome, "flattens applied -> a _cleaned file")
+            toDelete <- oriented :: cleaned.Value :: toDelete
+            Assert.IsTrue(oriented.EndsWith "_oriented.stl")
+            Assert.IsTrue(cleaned.Value.EndsWith "_cleaned.stl")
+
+            // Plate-noise spread in each file, measured about the median Y
+            // (the export is bbox-centred, so absolute Y is shifted): the
+            // oriented file must still carry the scan's jitter, the cleaned
+            // one must not.
+            let plateSpread (path : string) =
+                let m = MeshIO.load path
+                let ys = m.Vertices |> Array.map (fun v -> v.Y)
+                let sorted = Array.sort ys
+                let median = sorted[sorted.Length / 2]
+                // +-0.3, not +-0.5: the flange's first row sits exactly
+                // 0.5 mm off the plate and jitter tips half of it inside a
+                // +-0.5 window, polluting the spread of BOTH files.
+                let plate = ys |> Array.filter (fun y -> abs (y - median) < 0.3)
+                let mean = Array.average plate
+                sqrt (plate |> Array.averageBy (fun y -> (y - mean) ** 2.0))
+            let rawSpread = plateSpread oriented
+            let cleanSpread = plateSpread cleaned.Value
+            printfn "plate noise: oriented %.4f mm, cleaned %.4f mm" rawSpread cleanSpread
+            Assert.IsTrue(rawSpread > 0.012, $"_oriented must keep the scan's noise, got {rawSpread}")
+            Assert.IsTrue(cleanSpread < rawSpread / 3.0,
+                          $"_cleaned should be flat ({rawSpread} -> {cleanSpread})")
+            let a, b = MeshIO.load oriented, MeshIO.load cleaned.Value
+            Assert.AreEqual(a.TriangleCount, b.TriangleCount, "same triangles in both")
+        finally
+            for f in toDelete do
+                if File.Exists f then File.Delete f
+
     [<TestMethod>]
     member _.Rigid_undo_still_reports_no_mesh_change () =
         let s = MeshOrient.App.OrientState()

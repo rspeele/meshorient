@@ -58,7 +58,12 @@ type OrientState() =
     let mutable previewPicksVersion = -1
     let mutable picksVersion = 0
     let mutable previewStamp = 0
-    let mutable flattenedVerts = 0            // lifetime total, for the export note
+    let mutable flattenedVerts = 0            // net total baked into the mesh
+    /// The vertex array exactly as loaded. Flattens replace the working
+    /// array (never mutate it), so holding the original reference costs
+    /// nothing and lets the export always offer an un-mutated `_oriented`
+    /// alongside the flattened `_cleaned`.
+    let mutable pristineVerts : Vec3[] = [||]
 
     // Picks live in MODEL space, not world space. That means a re-orientation
     // carries them along for free: press SQUARE twice and the second reading
@@ -141,6 +146,7 @@ type OrientState() =
         adjacency <- None
         dropPreview ()
         flattenedVerts <- 0
+        pristineVerts <- m.Vertices
         recentre ()
         m
 
@@ -257,7 +263,7 @@ type OrientState() =
     member this.ApplySquare() : Result<Orient.SquareResult, string> =
         let world = this.PicksWorld
         if world.Length < 3 then
-            Error $"SQUARE needs 3 or more points on one flat side face (%d{world.Length} picked)."
+            Error $"Orient Face to Side needs 3 or more points on one flat side face (%d{world.Length} picked)."
         else
             let r = Orient.squareToAxis lockedAxis world
             this.ApplyRotation r.Rotation
@@ -267,11 +273,38 @@ type OrientState() =
     member this.ApplyStraighten() : Result<Orient.StraightenResult, string> =
         let world = this.PicksWorld
         if world.Length < 2 then
-            Error $"STRAIGHTEN needs 2 or more points on a flat top or bottom face (%d{world.Length} picked)."
+            Error $"Y-Spin Face to Level needs 2 or more points on a flat top or bottom face (%d{world.Length} picked)."
         else
             let r = Orient.straightenAbout lockedAxis world
             this.ApplyRotation r.Rotation
             Ok r
+
+    member _.CanCenterline = picks.Count >= 2
+
+    /// Translate in Y so the two picked faces sit symmetric about the XZ
+    /// plane — pick point(s) on the right face and on the left face, then
+    /// this. TRANSLATION ONLY, and deliberately not followed by a re-centre:
+    /// re-centring on the bbox is exactly what this overrides. It IS undone
+    /// by any later rotation (those re-centre), so it is a do-last step;
+    /// Undo covers mistakes.
+    member this.ApplyYCenterline() : Result<Orient.CenterlineResult, string> =
+        if mesh.IsNone then Error "Load a scan first."
+        elif picks.Count < 2 then
+            Error $"Y-Centerline needs points on BOTH faces (%d{picks.Count} picked) — at least one on each side."
+        else
+            let ys = this.PicksWorld |> Array.map (fun p -> p.Y)
+            match Orient.yCenterline 1.0 ys with
+            | Error(Orient.WrongClusterCount n) ->
+                Error($"Y-Centerline needs picks on exactly 2 Y-aligned faces — "
+                      + $"these form %d{n} group(s). Pick some on the right face, some on the left.")
+            | Error(Orient.ClusterTooLoose s) ->
+                Error($"One group of picks spreads %.2f{s} mm in Y — more than one face, "
+                      + "or a pick missed. Remove the stray (right-click) and retry.")
+            | Ok r ->
+                this.PushUndo(Rigid(rotation, offset))
+                offset <- offset + Vec3.create 0.0 r.ShiftY 0.0
+                reframe ()
+                Ok r
 
     /// What each button would do with the picks as they stand.
     ///
@@ -288,15 +321,15 @@ type OrientState() =
         // throws — and an exception on the pick path took the whole window
         // down. Guard before the call, not after it.
         if world.Length = 0 then ""
-        elif world.Length = 1 then "1 pick · SQUARE needs 3 · STRAIGHTEN needs 2"
+        elif world.Length = 1 then "1 pick · to-side needs 3 · y-spin needs 2"
         else
             let sq =
-                if world.Length < 3 then "SQUARE needs 3"
+                if world.Length < 3 then "to-side needs 3"
                 else
                     let r = Orient.squareToAxis lockedAxis world
-                    $"SQUARE %.3f{r.TiltDegrees}° (±%.3f{r.RmsMm} mm)"
+                    $"to-side %.3f{r.TiltDegrees}° (±%.3f{r.RmsMm} mm)"
             let r = Orient.straightenAbout lockedAxis world
-            $"%d{world.Length} picks · {sq} · STRAIGHTEN %.3f{r.AngleDegrees}° (±%.3f{r.RmsMm} mm)"
+            $"%d{world.Length} picks · {sq} · y-spin %.3f{r.AngleDegrees}° (±%.3f{r.RmsMm} mm)"
 
     // ------------------------------------------------------------ flatten
 
@@ -339,7 +372,7 @@ type OrientState() =
         | None -> Error "Load a scan first."
         | Some m ->
             if picks.Count < 3 then
-                Error $"FLATTEN needs 3 or more points on the flat (%d{picks.Count} picked)."
+                Error $"Flatten Face needs 3 or more points on the flat (%d{picks.Count} picked)."
             elif ceilingMm <= 0.0 then
                 Error "The ceiling must be a positive distance in mm."
             else
@@ -386,10 +419,23 @@ type OrientState() =
     /// and the status message must stop claiming it is.
     member _.FlattenedVertexCount = flattenedVerts
 
-    member _.ExportOrientedStl() : string =
+    /// Write up to TWO files beside the source:
+    ///   `<name>_oriented.stl` — always: the PRISTINE scan, rigidly
+    ///       transformed, no flattens even if some were applied;
+    ///   `<name>_cleaned.stl`  — only when flattens are baked in: the same
+    ///       orientation with the flattened vertices.
+    /// Returns (orientedPath, cleanedPath option).
+    member _.ExportStl() : string * string option =
         match mesh with
         | None -> failwith "nothing loaded"
         | Some m ->
-            let out = MeshIO.orientedPathFor m.SourcePath
-            MeshIO.saveStlBinary out (Mesh.transform rotation offset m)
-            out
+            let oriented = MeshIO.orientedPathFor m.SourcePath
+            MeshIO.saveStlBinary oriented
+                (Mesh.transform rotation offset { m with Vertices = pristineVerts })
+            let cleaned =
+                if flattenedVerts > 0 then
+                    let p = MeshIO.cleanedPathFor m.SourcePath
+                    MeshIO.saveStlBinary p (Mesh.transform rotation offset m)
+                    Some p
+                else None
+            oriented, cleaned

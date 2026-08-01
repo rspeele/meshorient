@@ -82,6 +82,51 @@ type StraightenResult =
         /// projected plane. The straightening analogue of `SquareResult.RmsMm`.
         RmsMm : float }
 
+// ------------------------------------------------------- Y-centerline
+
+type CenterlineResult =
+    {   /// Add this to the model's Y offset — a pure translation, no rotation.
+        ShiftY : float
+        /// Where the two picked faces end up after the shift: at +-HalfWidth.
+        HalfWidth : float }
+
+type CenterlineError =
+    /// The picks do not separate into exactly two Y-groups; the count says
+    /// what they DO form, so the message can name it.
+    | WrongClusterCount of int
+    /// Two groups, but one is spread wider than the tolerance — a pick
+    /// missed its face, and the centreline would inherit the miss.
+    | ClusterTooLoose of worstSpreadMm : float
+
+/// Translate-only centring: given picks on TWO opposite Y-aligned faces,
+/// the Y shift that puts those faces symmetric about the XZ plane.
+///
+/// Picks cluster by their world Y (split at any gap wider than `tolMm`,
+/// which doubles as the per-cluster spread limit — "within +-tol/2 of one
+/// Y"). Exactly two tight clusters are required; each face's Y is its
+/// cluster MEAN, so extra picks per side average out local scan noise
+/// instead of letting one noisy vertex place the centreline. Two picks are
+/// the degenerate case — two clusters of one — and need no special path.
+let yCenterline (tolMm : float) (pickYs : float[]) : Result<CenterlineResult, CenterlineError> =
+    let ys = Array.sort pickYs
+    if ys.Length < 2 then Error(WrongClusterCount(min ys.Length 1))
+    else
+        // Group at gaps wider than the tolerance.
+        let groups = ResizeArray<ResizeArray<float>>()
+        groups.Add(ResizeArray [ ys[0] ])
+        for i in 1 .. ys.Length - 1 do
+            if ys[i] - ys[i - 1] > tolMm then groups.Add(ResizeArray())
+            groups[groups.Count - 1].Add ys[i]
+        if groups.Count <> 2 then Error(WrongClusterCount groups.Count)
+        else
+            let spread (g : ResizeArray<float>) = Seq.max g - Seq.min g
+            let worst = max (spread groups[0]) (spread groups[1])
+            if worst > tolMm then Error(ClusterTooLoose worst)
+            else
+                let c1 = Seq.average groups[0]
+                let c2 = Seq.average groups[1]
+                Ok { ShiftY = -(c1 + c2) / 2.0; HalfWidth = (c2 - c1) / 2.0 }
+
 /// Rotate ABOUT `lockedAxis` so the face through `picks` comes level.
 ///
 /// `lockedAxis` is whatever stage 2 squared to (Y for a pistol frame). The

@@ -123,6 +123,52 @@ type SquareTests () =
 
 
 [<TestClass>]
+type CenterlineTests () =
+
+    /// The user's own worked example: 3 picks within ±0.5 of one Y, 4 within
+    /// ±0.5 of another — a clean two-cluster split, centred on the means.
+    [<TestMethod>]
+    member _.Two_clusters_centre_on_their_means () =
+        let ys = [| -30.1; -29.9; -30.0; 9.8; 10.1; 10.0; 9.9 |]
+        match Orient.yCenterline 1.0 ys with
+        | Error e -> Assert.Fail $"expected a clean split, got {e}"
+        | Ok r ->
+            // c1 = -30.0, c2 = 9.95 -> shift +10.025, faces at +-19.975.
+            Assert.AreEqual(10.025, r.ShiftY, 1e-9, "shift")
+            Assert.AreEqual(19.975, r.HalfWidth, 1e-9, "half width")
+
+    [<TestMethod>]
+    member _.Two_points_are_two_clusters_of_one () =
+        match Orient.yCenterline 1.0 [| 11.3; -10.7 |] with
+        | Error e -> Assert.Fail $"two points on two faces must work, got {e}"
+        | Ok r ->
+            Assert.AreEqual(-0.3, r.ShiftY, 1e-9)
+            Assert.AreEqual(11.0, r.HalfWidth, 1e-9)
+
+    [<TestMethod>]
+    member _.Three_groups_are_rejected_with_the_count () =
+        match Orient.yCenterline 1.0 [| -30.0; -29.8; 0.0; 0.2; 10.0; 10.1 |] with
+        | Error(Orient.WrongClusterCount n) -> Assert.AreEqual(3, n)
+        | other -> Assert.Fail $"expected WrongClusterCount 3, got {other}"
+
+    [<TestMethod>]
+    member _.One_group_is_rejected_with_the_count () =
+        match Orient.yCenterline 1.0 [| 10.0; 10.2; 10.4 |] with
+        | Error(Orient.WrongClusterCount n) -> Assert.AreEqual(1, n)
+        | other -> Assert.Fail $"expected WrongClusterCount 1, got {other}"
+
+    /// A chain of sub-tolerance gaps can accumulate into a spread far wider
+    /// than any face is noisy — that is a smeared selection, not a face, and
+    /// letting it through would let one bad pick drag the centreline.
+    [<TestMethod>]
+    member _.A_loose_cluster_is_rejected_by_spread_not_just_gaps () =
+        let ys = [| -30.0; 10.0; 10.9; 11.8; 12.7 |]     // gaps 0.9 -> one "cluster" 2.7 wide
+        match Orient.yCenterline 1.0 ys with
+        | Error(Orient.ClusterTooLoose s) -> Assert.AreEqual(2.7, s, 1e-9)
+        | other -> Assert.Fail $"expected ClusterTooLoose, got {other}"
+
+
+[<TestClass>]
 type StraightenTests () =
 
     /// The second alignment: get the bore pointing straight down X off picks

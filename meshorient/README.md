@@ -10,9 +10,11 @@ tier/silhouette/DXF half of f2s stays in f2s.
 
     dotnet run --project MeshOrient.App -- myscan.stl
 
-Reads STL (binary + ASCII), OBJ and PLY. Writes `<name>_oriented.stl` — a
-rigid transform of the vertices, same triangle count, same topology, nothing
-resampled, so sharp edges and open hole boundaries survive exactly.
+Reads STL (binary + ASCII), OBJ and PLY. **Export STL** writes up to two
+files beside the source: `<name>_oriented.stl` — always, the pristine scan
+rigidly transformed, nothing resampled, no flattens even if some were
+applied — and `<name>_cleaned.stl` when flattens are baked in, with the same
+orientation. The cleanup is never the price of the raw geometry.
 
 ## The window
 
@@ -26,6 +28,10 @@ change, so they are a live check on an orientation you are actively editing.
 | **T** | the top (+Z face) | +X right, +Y up |
 | **B** | the back (−X face) | −Y right, +Z up |
 | **3D** | orbit | drag orbit · middle-drag pan · wheel zoom · click pick · right-click unpick |
+
+Blender-style numpad in the 3D view: **1** the gun's right (as the R panel),
+**3** muzzle-on, **7** top, **9** flip to the opposite view, **2/4/6/8** 15°
+orbit steps, **5** toggle orthographic/perspective.
 
 These are genuine orthographic views, not mirrored to look familiar. A
 mirrored side view is a real trap — it turns a right-hand part into a
@@ -55,22 +61,23 @@ but it is why the two can disagree about which side is "right".
 
 ## Three moves, no modes
 
-There is no stage selector. **One pick list, and both alignment buttons read
-it** — SQUARE wants 3+ points, STRAIGHTEN wants 2+. Nothing has to be told
+There is no stage selector. **One pick list, and every button reads it** —
+Orient Face to Side wants 3+ points, Y-Spin Face to Level wants 2+. Nothing has to be told
 which you meant, so nothing can be set wrong. Each button greys itself out
 until it has enough points, so a button that is offered is a button that
 works, and the readout at bottom right always says what *both* would do with
 the picks you have:
 
-    4 picks · SQUARE 1.312° (±0.007 mm) · STRAIGHTEN 0.529° (±0.284 mm)
+    4 picks · to-side 1.312° (±0.007 mm) · y-spin 0.529° (±0.284 mm)
 
 Those two residuals are more use than a mode label: points spread over a flat
 side fit a plane tightly and a side-view line badly, and points along a top
 edge do the reverse — so the numbers tell you which face you are actually on.
 
-The typical run is: **Auto-orient → pick a flat side → SQUARE → Clear picks →
-pick a flat top → STRAIGHTEN → Export.** But nothing enforces that order; the
-90° buttons, Undo and Export all work at any point.
+The typical run is: **Auto-orient → pick a flat side → Orient Face to Side →
+Clear picks → pick a flat top → Y-Spin Face to Level → (optionally Flatten
+Face and Y-Centerline) → Export STL.** Nothing enforces that order; the 90°
+buttons, Undo and Export all work at any point.
 
 Each move narrows the freedom the one before it left, and each reports how
 good your picks actually were as well as what it did.
@@ -80,7 +87,8 @@ good your picks actually were as well as what it did.
 ambiguities PCA cannot resolve. Expect PCA to leave about a degree in the X-Z
 plane on an L-shaped part like a frame — that is what Straighten is for.
 
-**SQUARE.** Click **3 or more points on one face that really is flat** in
+**Orient Face to Side.** Click **3 or more points on one face that really
+is flat** in
 the 3D view — the frame's right side is ideal. A red marker drops on each. A
 plane is fitted and the *smallest* rotation that squares it to Y is applied:
 it removes tilt without spinning the model about Y, so the coarse orientation
@@ -96,7 +104,7 @@ The fitted plane draws in red against a blue Y = 0 datum in the T and B
 panels. Square it and the red line lands parallel to the blue one. A number
 saying "0.000°" asks to be believed; two parallel lines can be checked.
 
-**STRAIGHTEN.** Click **2 or more points on a flat top or bottom
+**Y-Spin Face to Level.** Click **2 or more points on a flat top or bottom
 reference** — a Glock slide top is the ideal case — and the model spins until
 that face is level and the bore runs straight down X. Two picks define the
 line exactly; more average out the error in each, which is the point of
@@ -104,21 +112,29 @@ picking several.
 
 This rotates **about Y**, not about X. That is forced, not a preference:
 once a side face is square to Y, rotating about X or Z tips it straight back
-out of square. Rotation about the axis SQUARE locked is the only remaining
+out of square. Rotation about the locked axis is the only remaining
 freedom — and it is exactly the one that swings the bore up and down in the
 side view. A 10° rotation about X moves the side face's normal from
 `(0, 1, 0)` to `(0, 0.985, 0.174)`; about Y it stays `(0, 1, 0)` exactly.
 `StraightenTests.Straightening_leaves_the_locked_axis_exactly_alone` is what
 stops anyone "fixing" this later.
 
-Re-squaring invalidates a previous straighten, so do them in that order — but
+Re-orienting invalidates a previous spin, so do them in that order — but
 nothing stops you going back and forth.
+
+**Y-Centerline.** Pick point(s) on the RIGHT face and on the LEFT face —
+one each is enough, more per side average the scan noise out — and the model
+TRANSLATES in Y so those faces sit symmetric about the XZ plane, ready to
+slice down the middle for a two-part grip. The picks must separate into
+exactly two tight Y-groups (±0.5 mm); anything else is rejected with the
+group count, so a stray pick cannot silently drag the centreline. Do this
+LAST: rotations re-centre on the bbox and undo it (Undo also undoes it).
 
 ## FLATTEN — de-noise a flat face onto its true plane
 
 Scan noise on a face you know is flat (a slide flat, a frame wall) can be
 removed here instead of eyeballed in Blender: pick 3+ points on the flat as
-usual, press **FLATTEN (preview)**, inspect, tweak, **APPLY**.
+usual, press **Flatten Face**, inspect the preview, tweak, **APPLY**.
 
 The naive "snap everything within k of the plane" fails two ways, and the
 implementation exists to avoid both:
@@ -169,7 +185,7 @@ and says how many verts were flattened instead.
   (exact-bit weld + face adjacency, cached per mesh). No Avalonia and no GL:
   that is what makes every measurement testable without a window.
 - `MeshOrient.App` — Avalonia 12 + Silk.NET.OpenGL. Same stack as CNCFlow.UI.
-- `MeshOrient.Core.Tests` — MSTest, 56 tests, run with `dotnet test`.
+- `MeshOrient.Core.Tests` — MSTest, 64 tests, run with `dotnet test`.
 
 One `OpenGlControlBase` with four `glViewport` passes, not four GL controls:
 each Avalonia GL control owns its own context, so a 760k-triangle scan would

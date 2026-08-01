@@ -155,6 +155,31 @@ type GlView(state : OrientState) as this =
     /// Point the 3D camera at whatever is loaded now.
     member _.FrameCamera() = orbit <- frameOrbit state.Bounds orbit
 
+    // ---- Blender-style numpad navigation for the 3D panel
+
+    /// Jump to an exact yaw/pitch (numpad 1/3/7 presets). Direct set, not
+    /// `rotate`, so the top view can sit exactly at the pole — the orbit
+    /// camera's tangent up-vector makes that safe.
+    member this.SetOrbitAngles(yaw : float32, pitch : float32) =
+        orbit <- { orbit with Yaw = yaw; Pitch = pitch }
+        this.RequestNextFrameRendering()
+
+    /// One numpad 2/4/6/8 step, through the same clamped path as a drag.
+    member this.OrbitBy(dYaw : float32, dPitch : float32) =
+        orbit <- rotate dYaw dPitch orbit
+        this.RequestNextFrameRendering()
+
+    /// Numpad 9: the exact opposite view (negated view direction).
+    member this.FlipOrbit() =
+        orbit <- { orbit with Yaw = orbit.Yaw + MathF.PI; Pitch = -orbit.Pitch }
+        this.RequestNextFrameRendering()
+
+    /// Numpad 5. Returns the new state so the window can announce it.
+    member this.ToggleProjection() : bool =
+        orbit <- { orbit with Orthographic = not orbit.Orthographic }
+        this.RequestNextFrameRendering()
+        orbit.Orthographic
+
     /// The mesh changed: re-upload on the next render, where the context is
     /// current. Re-orienting does NOT come through here — that is a uniform.
     member this.InvalidateMesh() =

@@ -281,10 +281,17 @@ let saveStlBinary (path : string) (m : Mesh) =
         put (off + 36) c) |> ignore
     File.WriteAllBytes(path, buf)
 
-/// `<name>_oriented.stl` beside the source file — the same naming f2s uses,
-/// so the two tools' outputs drop into a workflow interchangeably.
-let orientedPathFor (sourcePath : string) =
+let private suffixedPathFor (suffix : string) (sourcePath : string) =
     let dir = Path.GetDirectoryName sourcePath
-    let name = Path.GetFileNameWithoutExtension sourcePath
-    let file = name + "_oriented.stl"
+    let file = Path.GetFileNameWithoutExtension sourcePath + suffix + ".stl"
     if String.IsNullOrEmpty dir then file else Path.Combine(dir, file)
+
+/// `<name>_oriented.stl` beside the source file — the same naming f2s uses,
+/// so the two tools' outputs drop into a workflow interchangeably. Always
+/// the PURE rigid transform of the scan, no flattens.
+let orientedPathFor = suffixedPathFor "_oriented"
+
+/// `<name>_cleaned.stl` — the oriented scan WITH flatten mutations baked in.
+/// Written alongside `_oriented` so the untouched geometry is never the
+/// price of the cleanup.
+let cleanedPathFor = suffixedPathFor "_cleaned"
