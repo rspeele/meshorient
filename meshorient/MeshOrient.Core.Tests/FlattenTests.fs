@@ -120,6 +120,24 @@ module private FlattenFixtures =
             not (i < nPlate && x >= 15.0 && x + step <= 30.0 && z >= 20.0 && z + step <= 40.0)
         gridMesh ni nj pos keep
 
+    /// A flat plate with a smooth gaussian DOME (height 1.5, sigma 3 mm) in
+    /// the middle. The dome's slope never exceeds ~17 degrees, so the normal
+    /// gate passes ALL of it; the distance ceiling is what stops the flood,
+    /// making the cap an enclave with a captured, feathered annulus running
+    /// up to it — the exact "smooth gradient toward the enclave" geometry
+    /// where force-flattening used to print a ring.
+    let dome (sigma : float) : Mesh =
+        let rng = Random 41
+        let step = 0.5
+        let n = 61                                     // 30 x 30 mm plate
+        let pos i j =
+            let x, y = float i * step, float j * step
+            let r2 = (x - 15.0) ** 2.0 + (y - 15.0) ** 2.0
+            let z = 1.5 * exp (-r2 / (2.0 * 9.0))
+            Vec3.create x y z
+            + Vec3.create (noise rng sigma) (noise rng sigma) (noise rng sigma)
+        gridMesh n n pos (fun _ _ -> true)
+
     /// Face whose centroid is nearest (x, z) — a synthetic "pick" for the
     /// wall fixture (its plate lives in XZ).
     let faceNearXZ (m : Mesh) (x : float) (z : float) =
@@ -372,6 +390,69 @@ type FlattenTests () =
             |> Array.exists (fun (struct (idx, _)) ->
                 m.Vertices[idx].X > 59.9 && m.Vertices[idx].Y > 0.5)
         Assert.IsFalse(flangeMoved, "force must not leak beyond the enclaves")
+
+    /// The ring regression. Approaching a forced enclave through a smooth
+    /// gradient, the feather's residual GROWS toward the ceiling while the
+    /// forced interior lands at zero — so without the halo, the verts that
+    /// were NEARER the plane ended up FARTHER from it, printing a raised
+    /// ring around the erased pocket (user-reported). The halo pulls that
+    /// approach band to full strength, and the whole dome must come out
+    /// dead flat.
+    [<TestMethod>]
+    member _.Force_flatten_halo_kills_the_ring_around_a_gradual_enclave () =
+        let m = FlattenFixtures.dome sigma
+        let adj = Flatten.buildAdjacency m
+        let seeds = [| FlattenFixtures.faceNearXY m 3.0 3.0
+                       FlattenFixtures.faceNearXY m 27.0 27.0 |]
+        let pts = [| Vec3.create 2.0 2.0 0.0; Vec3.create 27.0 3.0 0.0
+                     Vec3.create 3.0 27.0 0.0 |]
+        let prm = { Flatten.defaults with FloorMm = 3.0 * sigma; CeilingMm = 0.3 }
+
+        // The geometry really is the drawn scenario: cap enclave, halo band.
+        let forced = Flatten.preview m adj seeds pts Vec3.unitZ { prm with ForceEnclaves = true }
+        printfn "dome: %d captured, %d enclave, %d halo faces, %d forced verts"
+                forced.CapturedFaces.Length forced.EnclaveFaces.Length
+                forced.HaloFaces.Length forced.ForcedVertexCount
+        Assert.AreEqual(1, forced.EnclaveCount, "the dome cap is one enclave")
+        Assert.IsTrue(forced.HaloFaces.Length > 50,
+                      $"the feathered annulus should join the force, got {forced.HaloFaces.Length}")
+
+        // After apply: NO ring. Every vert of every touched face — captured,
+        // halo and enclave alike — sits exactly on the plane.
+        let flat, _ = Flatten.apply m forced
+        let residual (faces : int[]) =
+            let mutable worst = 0.0
+            for f in faces do
+                for e in 0 .. 2 do
+                    let v = flat.Vertices[m.Indices[f * 3 + e]]
+                    worst <- max worst (abs (Vec3.dot (v - forced.PlaneOrigin) forced.PlaneNormal))
+            worst
+        let worstAll =
+            max (residual forced.CapturedFaces)
+                (max (residual forced.HaloFaces) (residual forced.EnclaveFaces))
+        printfn "worst residual anywhere after forced apply: %.5f mm" worstAll
+        // Not exactly zero: the halo BFS chains through feathered faces, and
+        // noise can dip one face fully under the floor mid-annulus, breaking
+        // the chain and leaving a just-past-floor vert its (tiny) feathered
+        // residual. Sub-micron — 400x below the scan's own noise. The ring
+        // this test exists to kill was ~0.3 mm.
+        Assert.IsTrue(worstAll < 0.005, $"no visible ring may remain, got {worstAll}")
+
+        // And the contrast that motivated the fix: WITHOUT the halo the
+        // annulus keeps a residual approaching the ceiling — enclave interior
+        // flat, its approach not. (Computed by re-running force with the same
+        // params but measuring only the annulus faces the halo identified.)
+        let plain = Flatten.preview m adj seeds pts Vec3.unitZ prm
+        let plainFlat, _ = Flatten.apply m plain
+        let mutable annulusWorst = 0.0
+        for f in forced.HaloFaces do
+            for e in 0 .. 2 do
+                let v = plainFlat.Vertices[m.Indices[f * 3 + e]]
+                annulusWorst <- max annulusWorst
+                                    (abs (Vec3.dot (v - plain.PlaneOrigin) plain.PlaneNormal))
+        printfn "same annulus without force: residual up to %.3f mm (the ring)" annulusWorst
+        Assert.IsTrue(annulusWorst > 0.15,
+                      "without force the annulus rightly keeps its feathered residual")
 
     // ----------------------------------------------------- state integration
 

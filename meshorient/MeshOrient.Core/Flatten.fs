@@ -146,6 +146,11 @@ type Preview =
         /// gates rejected; either way the one thing they should never be is
         /// invisible.
         EnclaveFaces : int[]
+        /// Captured faces pulled to FULL snap because they border a forced
+        /// enclave — the feather band that would otherwise ring the erased
+        /// pocket. Empty unless ForceEnclaves is set. Shown yellow too, so
+        /// the highlight is exactly the set that gets forced.
+        HaloFaces : int[]
         EnclaveCount : int
         /// Distinct connected islands the seeds landed in (a serration flat
         /// per pick, say).
@@ -279,48 +284,37 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
             planeO <- mean
             Array.fill dist 0 dist.Length nan       // distances are stale
 
-    // ---- moves and statistics
-    let moves = ResizeArray<struct (int * Vec3)>()
-    let snapped = Array.zeroCreate<bool> adj.CanonicalCount
-    let mutable movedCanon = 0
-    let mutable maxMove = 0.0
-    let mutable sumSqBefore = 0.0
-    let mutable sumSqAfter = 0.0
-    let mutable measured = 0
-    for c in regionVerts do
-        let d = distOf c
-        let ad = abs d
-        if ad <= ceiling then
-            let w = weight ad
-            sumSqBefore <- sumSqBefore + d * d
-            let residual = d * (1.0 - w)
-            sumSqAfter <- sumSqAfter + residual * residual
-            measured <- measured + 1
-            if w > 1e-9 then
-                snapped[c] <- true
-                movedCanon <- movedCanon + 1
-                maxMove <- max maxMove (w * ad)
-                let np = posOf c - planeN * (w * d)
-                for k in adj.CopyStart[c] .. adj.CopyStart[c + 1] - 1 do
-                    moves.Add(struct (adj.CopyItems[k], np))
-
-    // ---- enclaves: connected components of NON-captured faces.
-    // On a closed surface there is no "outside" — every complement component
-    // is bounded by the region — so the rule is: the largest component (by
-    // area) that touches the region is the rest of the model; every other
-    // touching component is an enclave. Components that never touch the
-    // region (disconnected debris shells) are nobody's business here.
+    // ---- enclaves: connected components of NON-captured faces that are
+    // completely surrounded by the capture.
+    //
+    // Telling an enclave from "the rest of the model" depends on whether the
+    // mesh has boundary edges:
+    //   - OPEN mesh (a plate, a clipped scan): a complement component that
+    //     owns boundary edges reaches the edge of the world — it is outside
+    //     by construction. Interior components are enclaves, all of them.
+    //     (The old always-largest rule failed here: flood a plate to its rim
+    //     and a lone dome cap was the ONLY complement component, so
+    //     "largest" declared the enclave to be the outside.)
+    //   - CLOSED mesh (a watertight scan): no boundary exists, so the
+    //     largest touching component is the rest of the model and the others
+    //     are enclaves. Blind spot, accepted: flood nearly all of a closed
+    //     mesh and the one genuine pocket left is called outside.
+    // Components that never touch the region (disconnected debris shells)
+    // are nobody's business either way.
     let enclaveFaces = ResizeArray<int>()
     let mutable enclaveCount = 0
     if regionVerts.Count > 0 then
+        let meshHasBoundary = adj.Neighbor |> Array.exists (fun n -> n = -1)
         let visited = Array.zeroCreate<bool> nf
-        let comps = ResizeArray<int[] * float * bool>()   // faces, area, touches
+        // faces, area, touches region, owns boundary edges
+        let comps = ResizeArray<int[] * float * bool * bool>()
         let stack = Stack<int>()
         for f0 in 0 .. nf - 1 do
             if not captured[f0] && not visited[f0] then
                 let faces = ResizeArray<int>()
                 let mutable area = 0.0
                 let mutable touches = false
+                let mutable atBoundary = false
                 visited[f0] <- true
                 stack.Push f0
                 while stack.Count > 0 do
@@ -329,37 +323,122 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
                     area <- area + 0.5 * Vec3.length (Mesh.crossArea m f)
                     for e in 0 .. 2 do
                         let nb = adj.Neighbor[f * 3 + e]
-                        if nb >= 0 then
-                            if captured[nb] then touches <- true
-                            elif not visited[nb] then
-                                visited[nb] <- true
-                                stack.Push nb
-                comps.Add(faces.ToArray(), area, touches)
-        let touching = comps |> Seq.filter (fun (_, _, t) -> t) |> Seq.toArray
-        if touching.Length > 1 then
-            let largest = touching |> Array.maxBy (fun (_, a, _) -> a)
-            for (faces, _, _) as comp in touching do
-                if not (obj.ReferenceEquals(comp, largest)) then
-                    enclaveCount <- enclaveCount + 1
-                    enclaveFaces.AddRange faces
+                        if nb < 0 then atBoundary <- true
+                        elif captured[nb] then touches <- true
+                        elif not visited[nb] then
+                            visited[nb] <- true
+                            stack.Push nb
+                comps.Add(faces.ToArray(), area, touches, atBoundary)
+        let touching = comps |> Seq.filter (fun (_, _, t, _) -> t) |> Seq.toArray
+        let isEnclave =
+            if meshHasBoundary then
+                fun (_, _, _, atBoundary) -> not atBoundary
+            else
+                // Closed mesh: everything except the largest touching comp.
+                let largest =
+                    if touching.Length = 0 then Unchecked.defaultof<_>
+                    else touching |> Array.maxBy (fun (_, a, _, _) -> a)
+                fun comp ->
+                    touching.Length > 1 && not (obj.ReferenceEquals(comp, largest))
+        for comp in touching do
+            if isEnclave comp then
+                let (faces, _, _, _) = comp
+                enclaveCount <- enclaveCount + 1
+                enclaveFaces.AddRange faces
 
-    // ---- ForceEnclaves: flatten the yellow pockets wholesale. Full-strength
-    // snap, no feather — the point is to erase the pocket, and its rim verts
-    // (shared with the captured flat) were already snapped by the normal
-    // pass, so the result meets the plate without a step.
+    // ---- final snap weight per canonical vert.
+    //
+    // Weights are FINALISED before a single move is emitted, because forcing
+    // can UPGRADE a vert the feather already gave a partial weight — and a
+    // duplicate entry in Moves would corrupt apply's sequential undo record.
+    // NaN = untouched; `touchedVerts` lists everything with a weight.
+    let wArr = Array.create adj.CanonicalCount nan
+    let touchedVerts = ResizeArray<int>()
+    let inline setW c w =
+        if Double.IsNaN wArr[c] then touchedVerts.Add c
+        wArr[c] <- w
+    for c in regionVerts do
+        let ad = abs (distOf c)
+        if ad <= ceiling then setW c (weight ad)
+
+    // ---- ForceEnclaves: erase the yellow pockets, AND the feather band that
+    // leads into them. Without the halo, the approach to a forced enclave is
+    // exactly backwards: feathered verts keep a residual that GROWS toward
+    // the ceiling while the enclave interior lands at zero, printing a raised
+    // ring around the erased pocket — the verts that were NEARER the plane
+    // would have ended up FARTHER from it (user-reported). So any captured
+    // face in the partial-weight zone connected to a forced enclave is pulled
+    // to full strength too; the halo BFS stops at the full-snap plateau,
+    // which is what keeps feathering intact everywhere it still belongs.
+    //
+    // Caveat, documented not hidden: if a forced enclave's halo band merges
+    // with the feather band at the region's OUTER edge (a feature bleeding
+    // into the flood boundary), the force follows it there and the boundary
+    // gets a hard edge. The yellow preview shows exactly how far the force
+    // reaches, so the merge is visible before it is applied.
+    let haloFaces = ResizeArray<int>()
     let mutable forcedCanon = 0
     if prm.ForceEnclaves && enclaveFaces.Count > 0 then
+        let inline forceVert c =
+            let already = not (Double.IsNaN wArr[c]) && wArr[c] > 1.0 - 1e-12
+            if not already then forcedCanon <- forcedCanon + 1
+            setW c 1.0
+        let enclaveMark = Array.zeroCreate<bool> nf
+        for f in enclaveFaces do
+            enclaveMark[f] <- true
+            for e in 0 .. 2 do forceVert adj.Canonical[m.Indices[f * 3 + e]]
+        // A captured face is halo-eligible while it still has feathered verts;
+        // faces fully inside the floor plateau stop the walk.
+        let partial f =
+            let mutable p = false
+            for e in 0 .. 2 do
+                if abs (distOf adj.Canonical[m.Indices[f * 3 + e]]) > floor then p <- true
+            p
+        let inHalo = Array.zeroCreate<bool> nf
+        let stack = Stack<int>()
         for f in enclaveFaces do
             for e in 0 .. 2 do
-                let c = adj.Canonical[m.Indices[f * 3 + e]]
-                if not snapped[c] then
-                    snapped[c] <- true
-                    forcedCanon <- forcedCanon + 1
-                    let d = distOf c
-                    maxMove <- max maxMove (abs d)
-                    let np = posOf c - planeN * d
-                    for k in adj.CopyStart[c] .. adj.CopyStart[c + 1] - 1 do
-                        moves.Add(struct (adj.CopyItems[k], np))
+                let nb = adj.Neighbor[f * 3 + e]
+                if nb >= 0 && captured[nb] && not inHalo[nb] && partial nb then
+                    inHalo[nb] <- true
+                    stack.Push nb
+        while stack.Count > 0 do
+            let f = stack.Pop()
+            haloFaces.Add f
+            for e in 0 .. 2 do forceVert adj.Canonical[m.Indices[f * 3 + e]]
+            for e in 0 .. 2 do
+                let nb = adj.Neighbor[f * 3 + e]
+                if nb >= 0 && captured[nb] && not inHalo[nb] && not enclaveMark[nb] && partial nb then
+                    inHalo[nb] <- true
+                    stack.Push nb
+
+    // ---- emission and statistics, from the final weights. One move per
+    // vert, ever. The RMS is measured over the REGION verts (the flat being
+    // cleaned); forced halo verts land at zero and show up in it, enclave
+    // interiors do not — they were never part of the flat's noise.
+    let moves = ResizeArray<struct (int * Vec3)>()
+    let mutable movedCanon = 0
+    let mutable maxMove = 0.0
+    let mutable sumSqBefore = 0.0
+    let mutable sumSqAfter = 0.0
+    let mutable measured = 0
+    for c in regionVerts do
+        let d = distOf c
+        if abs d <= ceiling then
+            let w = if Double.IsNaN wArr[c] then 0.0 else wArr[c]
+            sumSqBefore <- sumSqBefore + d * d
+            let residual = d * (1.0 - w)
+            sumSqAfter <- sumSqAfter + residual * residual
+            measured <- measured + 1
+    for c in touchedVerts do
+        let w = wArr[c]
+        if w > 1e-9 then
+            let d = distOf c
+            movedCanon <- movedCanon + 1
+            maxMove <- max maxMove (w * abs d)
+            let np = posOf c - planeN * (w * d)
+            for k in adj.CopyStart[c] .. adj.CopyStart[c + 1] - 1 do
+                moves.Add(struct (adj.CopyItems[k], np))
 
     let capturedList = ResizeArray<int>()
     for f in 0 .. nf - 1 do
@@ -369,6 +448,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         PlaneOrigin = planeO
         CapturedFaces = capturedList.ToArray()
         EnclaveFaces = enclaveFaces.ToArray()
+        HaloFaces = haloFaces.ToArray()
         EnclaveCount = enclaveCount
         Islands = islands
         Moves = moves.ToArray()

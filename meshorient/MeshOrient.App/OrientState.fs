@@ -339,9 +339,19 @@ type OrientState() =
 
     member _.Preview = preview
 
-    /// (captured, enclave) face lists for the highlight overlay.
+    /// (green, yellow) face lists for the highlight overlay. Yellow is
+    /// everything a force would flatten wholesale — enclaves plus their halo
+    /// — and those halo faces leave the green list so the two buffers never
+    /// overlap (identical geometry drawn twice at the same polygon offset
+    /// z-fights, and the honest color is the force's reach anyway).
     member _.PreviewFaces =
-        preview |> Option.map (fun pv -> pv.CapturedFaces, pv.EnclaveFaces)
+        preview
+        |> Option.map (fun pv ->
+            if pv.HaloFaces.Length = 0 then pv.CapturedFaces, pv.EnclaveFaces
+            else
+                let halo = System.Collections.Generic.HashSet<int> pv.HaloFaces
+                pv.CapturedFaces |> Array.filter (halo.Contains >> not),
+                Array.append pv.EnclaveFaces pv.HaloFaces)
 
     member _.CanFlatten = mesh.IsSome && picks.Count >= 3
 

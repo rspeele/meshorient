@@ -163,9 +163,15 @@ highlight **yellow** — enclaves. A yellow patch is either a genuine feature
 deeper than the ceiling; the point is that it is never invisible. The
 **force-flatten enclaves** checkbox (off by default) snaps the yellow
 pockets onto the plane wholesale, however far out their verts sit — for
-scanner blobs and dents living inside a flat. Detection is unchanged; only
-what happens to the enclaves changes, and the status line says how many
-verts it will force. The status
+scanner blobs and dents living inside a flat. The feathered band that leads
+into a forced enclave is pulled to full strength with it (the "halo", also
+shown yellow — the highlight is exactly the force's reach). Without that,
+a smooth approach to the pocket kept a residual that GREW toward the
+ceiling while the interior landed at zero: a raised ring around the erased
+blob, where the verts nearest the plane ended up farthest from it. Measured
+on the dome fixture: 0.45 mm ring without the halo, under a micron with it.
+Detection is unchanged; only what happens to enclaves changes, and the
+status line says how many verts it will force. The status
 line reports verts, islands, RMS before → after, max move, and enclave count.
 Nothing moves until APPLY; Esc or Discard drops the preview; Undo reverses an
 apply exactly.
