@@ -70,6 +70,10 @@ type MainWindow() as this =
                           FontSize = 12.0, Watermark = "auto")
     let tbCeiling = TextBox(Width = 64.0, Text = "0.3",
                             Margin = Thickness(4.0, 0.0, 10.0, 0.0), FontSize = 12.0)
+    let cbForce = CheckBox(Content = "force-flatten enclaves", FontSize = 12.0,
+                           Margin = Thickness(0.0, 0.0, 10.0, 0.0),
+                           VerticalAlignment = VerticalAlignment.Center)
+    let forceOn () = cbForce.IsChecked.GetValueOrDefault false
     let mutable btFlatten : Button = null
     let mutable btApply : Button = null
     let mutable btDiscard : Button = null
@@ -82,7 +86,7 @@ type MainWindow() as this =
     let refreshFlattenBar () =
         let current =
             match parsedParams () with
-            | Some(f, c) -> state.PreviewIsCurrent(f, c)
+            | Some(f, c) -> state.PreviewIsCurrent(f, c, forceOn ())
             | None -> false
         if not (isNull btFlatten) then
             btFlatten.IsEnabled <- state.CanFlatten && not current
@@ -178,8 +182,12 @@ type MainWindow() as this =
         setStatus "Undone."
 
     let previewStatus (pv : MeshOrient.Core.Flatten.Preview) =
-        let enc = if pv.EnclaveCount > 0 then $" · %d{pv.EnclaveCount} enclave(s) in YELLOW — inspect them"
-                  else ""
+        let enc =
+            if pv.ForcedVertexCount > 0 then
+                $" · %d{pv.EnclaveCount} enclave(s) in YELLOW will be FORCED flat (%d{pv.ForcedVertexCount} verts)"
+            elif pv.EnclaveCount > 0 then
+                $" · %d{pv.EnclaveCount} enclave(s) in YELLOW — inspect them"
+            else ""
         $"Preview: would flatten %d{pv.MovedVertexCount} verts across %d{pv.Islands} island(s) · RMS %.3f{pv.RmsBeforeMm} → %.3f{pv.RmsAfterMm} mm · max move %.3f{pv.MaxMoveMm} mm{enc}. Tweak floor/ceiling and APPLY when it looks right."
 
     /// Compute or refresh the preview from the boxes. The floor box pre-fills
@@ -193,7 +201,7 @@ type MainWindow() as this =
         match parsedParams () with
         | None -> setStatus "Floor and ceiling must be numbers (mm), ceiling > 0."
         | Some(f, c) ->
-            match state.ComputeFlattenPreview(f, c) with
+            match state.ComputeFlattenPreview(f, c, forceOn ()) with
             | Error msg -> setStatus msg
             | Ok pv ->
                 refresh ()
@@ -340,6 +348,12 @@ type MainWindow() as this =
                          doDiscardPreview
         wireParamBox tbFloor
         wireParamBox tbCeiling
+        ToolTip.SetTip(cbForce,
+            "Snap the YELLOW pockets flat too, however far out their verts sit — for scanner "
+            + "blobs and dents living inside the flat. Leave off when an enclave is a real feature.")
+        // A checkbox click is a discrete gesture, same class as an arrow press:
+        // a live preview follows it.
+        cbForce.IsCheckedChanged.Add(fun _ -> syncPreview ())
         ToolTip.SetTip(tbFloor,
             "Noise floor, mm: distances up to this snap fully. Pre-fills from your picks' "
             + "plane-fit RMS ×3. ↑/↓ steps ±0.1 above 0.1, halves/doubles below.")
@@ -353,6 +367,7 @@ type MainWindow() as this =
         flattenBar.Children.Add tbFloor
         flattenBar.Children.Add(label "ceiling mm")
         flattenBar.Children.Add tbCeiling
+        flattenBar.Children.Add cbForce
         flattenBar.Children.Add btApply
         flattenBar.Children.Add btDiscard
 

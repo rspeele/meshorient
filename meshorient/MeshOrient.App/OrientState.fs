@@ -54,7 +54,7 @@ type OrientState() =
     // do, which is what the version counters track.
     let mutable adjacency : Flatten.Adjacency option = None
     let mutable preview : Flatten.Preview option = None
-    let mutable previewParams = (nan, nan)
+    let mutable previewParams = (nan, nan, false)
     let mutable previewPicksVersion = -1
     let mutable picksVersion = 0
     let mutable previewStamp = 0
@@ -348,12 +348,12 @@ type OrientState() =
     /// True when the shown preview matches these parameters AND the picks it
     /// was computed from — i.e. pressing Update would change nothing. The
     /// window greys the button on this.
-    member _.PreviewIsCurrent(floorMm : float, ceilingMm : float) =
+    member _.PreviewIsCurrent(floorMm : float, ceilingMm : float, forceEnclaves : bool) =
         match preview with
         | None -> false
         | Some _ ->
-            let (pf, pc) = previewParams
-            previewPicksVersion = picksVersion
+            let (pf, pc, pforce) = previewParams
+            previewPicksVersion = picksVersion && pforce = forceEnclaves
             && abs (pf - floorMm) < 1e-12 && abs (pc - ceilingMm) < 1e-12
 
     /// Suggested noise floor: 3x the plane-fit RMS of the picks — the scan's
@@ -366,7 +366,7 @@ type OrientState() =
 
     /// Compute (or refresh) the preview. Pure with respect to the mesh —
     /// nothing moves until ApplyFlatten.
-    member this.ComputeFlattenPreview(floorMm : float, ceilingMm : float)
+    member this.ComputeFlattenPreview(floorMm : float, ceilingMm : float, forceEnclaves : bool)
             : Result<Flatten.Preview, string> =
         match mesh with
         | None -> Error "Load a scan first."
@@ -388,9 +388,12 @@ type OrientState() =
                 let hint = picks |> Seq.fold (fun acc p -> acc + p.Normal) Vec3.zero
                 let pv =
                     Flatten.preview m adj seeds pts hint
-                        { Flatten.defaults with FloorMm = floorMm; CeilingMm = ceilingMm }
+                        { Flatten.defaults with
+                            FloorMm = floorMm
+                            CeilingMm = ceilingMm
+                            ForceEnclaves = forceEnclaves }
                 preview <- Some pv
-                previewParams <- (floorMm, ceilingMm)
+                previewParams <- (floorMm, ceilingMm, forceEnclaves)
                 previewPicksVersion <- picksVersion
                 previewStamp <- previewStamp + 1
                 Ok pv

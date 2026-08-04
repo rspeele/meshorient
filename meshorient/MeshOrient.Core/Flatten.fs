@@ -123,9 +123,17 @@ type Params =
         /// A face joins the flood only if its normal is within this many
         /// degrees of the plane normal. Real scan flats jitter by ~8 degrees;
         /// 30 accepts them with margin and still rejects any genuine chamfer.
-        NormalGateDegrees : float }
+        NormalGateDegrees : float
+        /// When set, every vertex of every ENCLAVE face — the yellow pockets,
+        /// fully surrounded by the captured flat — is snapped to the plane at
+        /// FULL strength, however far out it sits. For scanner blobs and
+        /// dents living inside a flat: surrounded, but beyond the ceiling's
+        /// reach. Off by default because an enclave is just as often a
+        /// genuine feature.
+        ForceEnclaves : bool }
 
-let defaults = { FloorMm = 0.075; CeilingMm = 0.3; NormalGateDegrees = 30.0 }
+let defaults =
+    { FloorMm = 0.075; CeilingMm = 0.3; NormalGateDegrees = 30.0; ForceEnclaves = false }
 
 type Preview =
     {   /// The refined plane (unit normal, oriented outward like the picks).
@@ -146,6 +154,8 @@ type Preview =
         /// is a plain scatter.
         Moves : struct (int * Vec3)[]
         MovedVertexCount : int
+        /// Verts snapped by ForceEnclaves on top of the normal capture.
+        ForcedVertexCount : int
         RmsBeforeMm : float
         RmsAfterMm : float
         MaxMoveMm : float }
@@ -271,6 +281,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
 
     // ---- moves and statistics
     let moves = ResizeArray<struct (int * Vec3)>()
+    let snapped = Array.zeroCreate<bool> adj.CanonicalCount
     let mutable movedCanon = 0
     let mutable maxMove = 0.0
     let mutable sumSqBefore = 0.0
@@ -286,6 +297,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
             sumSqAfter <- sumSqAfter + residual * residual
             measured <- measured + 1
             if w > 1e-9 then
+                snapped[c] <- true
                 movedCanon <- movedCanon + 1
                 maxMove <- max maxMove (w * ad)
                 let np = posOf c - planeN * (w * d)
@@ -331,6 +343,24 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
                     enclaveCount <- enclaveCount + 1
                     enclaveFaces.AddRange faces
 
+    // ---- ForceEnclaves: flatten the yellow pockets wholesale. Full-strength
+    // snap, no feather — the point is to erase the pocket, and its rim verts
+    // (shared with the captured flat) were already snapped by the normal
+    // pass, so the result meets the plate without a step.
+    let mutable forcedCanon = 0
+    if prm.ForceEnclaves && enclaveFaces.Count > 0 then
+        for f in enclaveFaces do
+            for e in 0 .. 2 do
+                let c = adj.Canonical[m.Indices[f * 3 + e]]
+                if not snapped[c] then
+                    snapped[c] <- true
+                    forcedCanon <- forcedCanon + 1
+                    let d = distOf c
+                    maxMove <- max maxMove (abs d)
+                    let np = posOf c - planeN * d
+                    for k in adj.CopyStart[c] .. adj.CopyStart[c + 1] - 1 do
+                        moves.Add(struct (adj.CopyItems[k], np))
+
     let capturedList = ResizeArray<int>()
     for f in 0 .. nf - 1 do
         if captured[f] then capturedList.Add f
@@ -343,6 +373,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         Islands = islands
         Moves = moves.ToArray()
         MovedVertexCount = movedCanon
+        ForcedVertexCount = forcedCanon
         RmsBeforeMm = if measured = 0 then 0.0 else sqrt (sumSqBefore / float measured)
         RmsAfterMm = if measured = 0 then 0.0 else sqrt (sumSqAfter / float measured)
         MaxMoveMm = maxMove }

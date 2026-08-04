@@ -324,6 +324,55 @@ type FlattenTests () =
         Assert.AreEqual(0, flangeMoved, "the flange is not part of the flat")
         Assert.IsTrue(flat.Vertices.Length = m.Vertices.Length)
 
+    /// ForceEnclaves: the same wall, but the boss and rib — 1.5 mm proud,
+    /// far beyond the ceiling — get squashed onto the plane wholesale. Their
+    /// rim verts were already snapped by the normal pass, so the erased
+    /// pocket meets the plate without a step.
+    [<TestMethod>]
+    member _.Force_flatten_squashes_the_enclaves_onto_the_plane () =
+        let m = FlattenFixtures.wall sigma
+        let adj = Flatten.buildAdjacency m
+        let seeds =
+            [| FlattenFixtures.faceNearXZ m 5.0 5.0
+               FlattenFixtures.faceNearXZ m 55.0 10.0
+               FlattenFixtures.faceNearXZ m 5.0 75.0 |]
+        let pts = seeds |> Array.map (fun f ->
+            let struct (a, b, c) = Mesh.triangle m f
+            (a + b + c) / 3.0)
+        let prm = { Flatten.defaults with FloorMm = 3.0 * sigma; CeilingMm = 0.3 }
+
+        let plain = Flatten.preview m adj seeds pts Vec3.unitY prm
+        let forced = Flatten.preview m adj seeds pts Vec3.unitY { prm with ForceEnclaves = true }
+        printfn "forced: %d extra verts, max move %.3f (plain max %.3f)"
+                forced.ForcedVertexCount forced.MaxMoveMm plain.MaxMoveMm
+
+        // Same detection either way — the checkbox changes what HAPPENS to
+        // the enclaves, not what counts as one.
+        Assert.AreEqual(plain.EnclaveCount, forced.EnclaveCount)
+        Assert.AreEqual(0, plain.ForcedVertexCount, "off by default: nothing forced")
+        Assert.IsTrue(forced.ForcedVertexCount > 100,
+                      $"boss + rib carry hundreds of verts, got {forced.ForcedVertexCount}")
+        Assert.IsTrue(forced.MaxMoveMm > 1.2 && forced.MaxMoveMm < 2.0,
+                      $"max move should be the 1.5 mm feature height, got {forced.MaxMoveMm}")
+        Assert.IsTrue(plain.MaxMoveMm < 0.31, "without force, nothing beyond the ceiling moves")
+
+        // After apply, every enclave-face vert sits ON the plane.
+        let flat, _ = Flatten.apply m forced
+        let mutable worst = 0.0
+        for f in forced.EnclaveFaces do
+            for e in 0 .. 2 do
+                let v = flat.Vertices[m.Indices[f * 3 + e]]
+                worst <- max worst (abs (Vec3.dot (v - forced.PlaneOrigin) forced.PlaneNormal))
+        printfn "worst enclave-vert distance after forced apply: %.5f mm" worst
+        Assert.IsTrue(worst < 1e-6, $"forced enclaves must be exactly flat, got {worst}")
+
+        // And the flange still did not move: force reaches enclaves only.
+        let flangeMoved =
+            forced.Moves
+            |> Array.exists (fun (struct (idx, _)) ->
+                m.Vertices[idx].X > 59.9 && m.Vertices[idx].Y > 0.5)
+        Assert.IsFalse(flangeMoved, "force must not leak beyond the enclaves")
+
     // ----------------------------------------------------- state integration
 
     /// The full preview loop as the window drives it, on a mesh that took the
@@ -350,14 +399,14 @@ type FlattenTests () =
             // Preview is pure: stamp ticks, currency tracks, nothing moves.
             let before = Array.copy s.Mesh.Value.Vertices
             let stamp0 = s.PreviewStamp
-            match s.ComputeFlattenPreview(floor, 0.3) with
+            match s.ComputeFlattenPreview(floor, 0.3, false) with
             | Error e -> Assert.Fail e
             | Ok pv ->
                 printfn "preview: %d verts, %d enclaves" pv.MovedVertexCount pv.EnclaveCount
                 Assert.IsTrue(pv.MovedVertexCount > 10000, "should preview the whole plate")
                 Assert.AreNotEqual(stamp0, s.PreviewStamp, "stamp must tick for the GL view")
-                Assert.IsTrue(s.PreviewIsCurrent(floor, 0.3))
-                Assert.IsFalse(s.PreviewIsCurrent(floor, 0.4), "other params = stale")
+                Assert.IsTrue(s.PreviewIsCurrent(floor, 0.3, false))
+                Assert.IsFalse(s.PreviewIsCurrent(floor, 0.4, false), "other params = stale")
                 let untouched =
                     Array.forall2 (fun (a : Vec3) (b : Vec3) ->
                         a.X = b.X && a.Y = b.Y && a.Z = b.Z) before s.Mesh.Value.Vertices
@@ -367,8 +416,8 @@ type FlattenTests () =
             // be what APPLY would do.
             s.PickAt { Raycast.Origin = Vec3.create (40.0 + s.Offset.X) 1000.0 (10.0 + s.Offset.Z)
                        Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
-            Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3), "pick edits must stale the preview")
-            s.ComputeFlattenPreview(floor, 0.3) |> ignore
+            Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false), "pick edits must stale the preview")
+            s.ComputeFlattenPreview(floor, 0.3, false) |> ignore
 
             // Apply: mesh moves, picks are KEPT, count recorded.
             let nPicks = s.Picks.Count
@@ -410,7 +459,7 @@ type FlattenTests () =
                 let o = s.Offset
                 s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
                            Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
-            s.ComputeFlattenPreview(3.0 * sigma, 0.3) |> ignore
+            s.ComputeFlattenPreview(3.0 * sigma, 0.3, false) |> ignore
             match s.ApplyFlatten() with
             | Error e -> Assert.Fail e
             | Ok _ -> ()
