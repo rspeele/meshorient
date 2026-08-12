@@ -122,10 +122,10 @@ type GeometryTests () =
             Assert.AreEqual(reference.Y, s.Y, 0.5, $"Y extent for pose ({rx}, {ry}, {rz})")
             Assert.AreEqual(reference.Z, s.Z, 0.5, $"Z extent for pose ({rx}, {ry}, {rz})")
 
-    /// meshorient weights the covariance by triangle area, where f2s uses raw
+    /// The covariance is weighted by triangle area rather than built from raw
     /// vertices. On an evenly tessellated scan the two must agree — this pins
-    /// that, so the change is an improvement in the uneven case rather than a
-    /// different answer everywhere.
+    /// that, so area weighting is an improvement in the uneven case rather
+    /// than a different answer everywhere.
     [<TestMethod>]
     member _.Area_weighted_pca_agrees_with_vertex_pca_on_an_even_mesh () =
         let m = Fixtures.synthetic.Value

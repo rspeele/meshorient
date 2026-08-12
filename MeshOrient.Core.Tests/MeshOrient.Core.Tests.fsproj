@@ -31,7 +31,7 @@
     <!-- frame2solid's synthetic scan is the fixture: a mock frame with known
          dimensions and deliberate scan defects. Sharing it means meshorient
          and f2s can be measured against the same object. -->
-    <Content Include="..\..\synthetic_frame_scan.stl">
+    <Content Include="..\synthetic_frame_scan.stl">
       <Link>synthetic_frame_scan.stl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

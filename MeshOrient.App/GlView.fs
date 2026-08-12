@@ -70,10 +70,9 @@ type GlView(state : OrientState) as this =
     /// World-space line geometry for the overlays: the datum the correction is
     /// judged against, and the trace of whatever is currently fitted.
     ///
-    /// This is f2s's best idea from its Level step carried over — the fitted
-    /// plane drawn in red against a blue Y=0 datum, so pressing LEVEL visibly
-    /// snaps one parallel to the other. A number saying "0.00 degrees" asks to
-    /// be believed; two parallel lines can be checked.
+    /// The fitted plane draws in red against a blue Y=0 datum, so squaring
+    /// visibly snaps one parallel to the other. A number saying "0.00 degrees"
+    /// asks to be believed; two parallel lines can be checked.
     let buildOverlay () =
         let verts = ResizeArray<Scene.LineVertex>()
         let b = state.Bounds
@@ -109,8 +108,7 @@ type GlView(state : OrientState) as this =
                 if abs n.Y > 1e-9 then
                     let cen = fit.Centroid
                     // Where the fitted plane cuts a line of constant X (or of
-                    // constant Z) — the same two traces f2s draws on its front
-                    // and top views.
+                    // constant Z).
                     let yAt (x : float) (z : float) =
                         cen.Y - (n.X * (x - cen.X) + n.Z * (z - cen.Z)) / n.Y
                     let x0, x1 = lo.X - padX, hi.X + padX
@@ -313,9 +311,8 @@ type GlView(state : OrientState) as this =
                     Scene.drawLit gl progs sphereBuf m view proj pickColour
 
                 // Overlays only in the panels they mean something in: the
-                // SQUARE traces read in Top and Back (exactly the two views
-                // f2s draws them on), the STRAIGHTEN trace in the side view
-                // it is fitted in. The 3D panel stays clean.
+                // SQUARE traces read in Top and Back, the STRAIGHTEN trace in
+                // the side view it is fitted in. The 3D panel stays clean.
                 let wantsOverlay =
                     match panel.Kind with
                     | Top | Back | Right -> true

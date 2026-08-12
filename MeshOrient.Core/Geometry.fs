@@ -1,9 +1,8 @@
 /// Fitting primitives: eigen-decomposition, plane fit, 2D line fit, PCA.
 ///
-/// Ported from f2s's `core.fit_plane` / `core.auto_orient`, which lean on
-/// numpy's SVD. There is no SVD here and none is needed: every fit in this
-/// tool is the eigen-decomposition of a small symmetric covariance matrix, and
-/// cyclic Jacobi does that in fifty lines with no dependency.
+/// There is no SVD here and none is needed: every fit in this tool is the
+/// eigen-decomposition of a small symmetric covariance matrix, and cyclic
+/// Jacobi does that in fifty lines with no dependency.
 module MeshOrient.Core.Geometry
 
 open System
@@ -149,11 +148,11 @@ let fitLine2 (points : (float * float)[]) : LineFit2 =
     { DirX = dx; DirY = dy; CentroidX = mx; CentroidY = my; Rms = sqrt (acc / n) }
 
 /// PCA orientation guess: longest principal axis -> X, thinnest -> Y,
-/// middle -> Z. Same convention as f2s's `core.auto_orient`; 90-degree
+/// middle -> Z. 90-degree
 /// ambiguities are expected and the UI's rotate/flip buttons resolve them.
 ///
 /// The covariance comes from AREA-WEIGHTED TRIANGLE CENTROIDS, not from the
-/// raw vertex array as f2s uses. Vertex PCA measures the tessellation, not the
+/// raw vertex array. Vertex PCA measures the tessellation, not the
 /// shape: a finely remeshed patch contributes hundreds of times more points
 /// than a flat wall of the same size and drags the axes toward itself.
 /// Weighting each triangle's centroid by its area measures the surface, which

@@ -22,8 +22,8 @@ open System
 
 let private toDegrees r = r * 180.0 / Math.PI
 
-/// The offset that puts the bounding-box centre at the origin.
-/// f2s's `core.center_verts`, as a translation rather than a new array.
+/// The offset that puts the bounding-box centre at the origin, as a
+/// translation rather than a new array.
 let recentreOffset (m : Mesh) : Vec3 =
     let b = Mesh.bounds m
     if b.IsEmpty then Vec3.zero else -(Bounds.centre b)
@@ -45,8 +45,7 @@ type SquareResult =
 ///
 /// Rodrigues about `normal x target`, so it removes tilt without spinning the
 /// model about the target axis — whatever stage 1 established stays put, and
-/// stage 3 is left with a clean single degree of freedom. Straight port of
-/// f2s's `core.level_rotation`.
+/// stage 3 is left with a clean single degree of freedom.
 let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
     let fit = Geometry.fitPlane picks
     let target = Vec3.axis axis
@@ -64,8 +63,8 @@ let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
 
 /// The two visible components of a tilt, in degrees, for the ortho-view
 /// titles: rotation about X leans the model in the back (Y-Z) view, rotation
-/// about Z leans it in the top (X-Y) view. Same decomposition f2s draws in
-/// `App._draw_level_aux`. Only meaningful for a Y-axis square.
+/// about Z leans it in the top (X-Y) view. Only meaningful for a Y-axis
+/// square.
 let tiltComponents (picks : Vec3[]) : float * float =
     let fit = Geometry.fitPlane picks
     let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal

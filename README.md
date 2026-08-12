@@ -1,229 +1,239 @@
-# frame2solid
+# meshorient
 
-Two things, for a grip-transplant project:
+Gets a raw 3D scan **square**, then writes it back out.
 
-1. **Get a raw frame scan square.** Load it, PCA-orient it, then level it off
-   three clicks on a face you know is flat, and write it back out with the
-   orientation baked in — a rigid transform, nothing resampled. This is the
-   fiddly part of any scan-to-CAD job, and everything downstream (Blender
-   booleans, MeshMixer registration, CNC) is easier on a datum that means
-   something. Steps 1–2, and for a lot of work that is the whole of it.
-2. **Rebuild the frame as a clean subtraction solid** — the thing you
-   boolean-subtract from a donor grip exterior. Fills magwell windows and pin
-   holes automatically, quantises the frame into a stack of flat **thickness
-   tiers, independently per side** (so a trigger-bar relief on the right
-   doesn't fatten the left), applies a fit-clearance offset, and exports the
-   result as CAD: one DXF per sketch plus the extrusion table and a
-   ready-to-run OpenSCAD assembly. Steps 3–5, and the DXFs are what SolveSpace
-   and VCarve want.
+That is the whole tool. Getting a scan onto a datum that means something is
+the fiddly part of any scan-to-CAD job — and everything downstream (Blender
+booleans, MeshMixer registration, CNC setup) is easier once it is done.
 
-If your scan is already watertight and you are comfortable in Blender, (1) plus
-cubes in Blender may well be all you need; (2) earns its keep when you want
-real profiles to machine or edit rather than a mesh.
+    dotnet run --project MeshOrient.App -- myscan.stl
 
-## Install (Windows)
+Reads STL (binary + ASCII), OBJ and PLY. **Export STL** writes up to two
+files beside the source: `<name>_oriented.stl` — always, the pristine scan
+rigidly transformed, nothing resampled, no flattens even if some were
+applied — and `<name>_cleaned.stl` when flattens are baked in, with the same
+orientation. The cleanup is never the price of the raw geometry.
 
-1. Install Python 3.10+ from https://python.org (check "Add to PATH").
-2. In a command prompt, in this folder:
+**Loading does not move the model.** Centring on the bbox happens on the
+FIRST orientation command, not before — so a scan you only flatten and
+re-export comes back in the exact coordinate frame it arrived in, ready to
+drop onto other objects registered against it. The export status names the
+frame it wrote ("original coordinates" vs "the oriented datum"). Note
+Y-Centerline is a deliberate translation, so it counts as orientation.
 
-       pip install -r requirements.txt
-       python app.py
+## The window
 
-Three wheels, no mesh stack (numpy, opencv-python, matplotlib). Try it first
-with the included
-`synthetic_frame_scan.stl` (a mock frame with a magwell window, three
-thicknesses and a right-side-only boss) — the default scan path points at it.
+Three fixed orthographic panels down the left, one orbiting 3D view on the
+right. The ortho panels re-frame themselves to the whole model after every
+change, so they are a live check on an orientation you are actively editing.
 
-## Coordinate convention
+| | shows | on screen |
+|---|---|---|
+| **R** | the right side (−Y face) | +X right, +Z up |
+| **T** | the top (+Z face) | +X right, +Y up |
+| **B** | the back (−X face) | −Y right, +Z up |
+| **3D** | orbit | drag orbit · middle-drag pan · wheel zoom · click pick · right-click unpick |
 
-After the Orient step your scan must sit like this (all mm):
+Blender-style numpad in the 3D view: **1** the right side (as the R panel),
+**3** the front (+X end-on), **7** top, **9** flip to the opposite view,
+**2/4/6/8** 15° orbit steps, **5** toggle orthographic/perspective.
 
-- **X** = along the bore / frame length
-- **Y** = across the frame (left-right); mid-plane near **Y = 0** (it needn't
-  be exact — step 2 squares the scan up and step 4's `y0` measures where it
-  actually is)
-- **Z** = vertical
+These are genuine orthographic views, not mirrored to look familiar. A
+mirrored side view is a real trap — it turns a right-hand part into a
+left-hand one and nothing on screen says so — so each panel spells out which
+way its axes run.
 
-The side view (X-Z) is what becomes the outline. If you've already aligned the
-scan in MeshMixer/Blender, export it that way and skip PCA; otherwise
-"Auto-orient (PCA)" plus the 90° buttons gets you there in a few clicks.
+### Which way round
 
-## The five steps
+The world is right-handed, so naming three views leaves no free choice. Fix
+the part's long axis along +X and up along +Z, and its right side is
+**forced** to −Y, because right = forward × up:
 
-**1 · Load/Orient.** Load STL/OBJ/PLY. Three projection views update as you
-rotate. You're done when the SIDE view shows the classic frame profile, the
-FRONT view looks thin, and the TOP view is symmetric about Y=0. "re-center"
-puts the bounding-box center at the origin (it runs automatically after each
-rotation).
+    +X = forward               -X = back
+    +Z = up                    -Z = down
+    -Y = the part's RIGHT      +Y = the part's left
 
-**2 · Level.** PCA gets you close but leaves a fraction of a degree of tilt,
-and that's enough to make the trigger guard read thicker than the backstrap
-even when they're identical. The view here is the **height of the scan's
-right-hand surface**, so residual tilt shows up as a gradient sliding across
-a face you know is flat.
+Orient the scan so the top shows in T and the back shows in B, and R then
+genuinely shows the right side with the front of the part running off to the
+right of frame.
 
-Click **3 or more points on one face that really is flat** — spread them
-out, the corners of the frame's right side are ideal. Each pick reports the
-Y it found, and once you have three the title tells you the tilt angle and
-how coplanar your picks actually were (if that number is large, one of them
-isn't on the flat). **LEVEL** applies the smallest rotation that squares
-that face up to Y; it only removes tilt, it never spins the frame about Y.
-"Undo level" puts the orientation back.
+## Three moves, no modes
 
-The **front (Y-Z)** and **top (X-Y)** views sit alongside, because that is
-where the two components of a tilt are actually visible: a tilt about X
-leans the frame in the front view, a tilt about Z leans it in the top view,
-and each title names its own angle. The fitted plane is drawn in red against
-a blue Y=0 datum — press LEVEL and the red line snaps parallel to the blue
-one. That is the correction, visible rather than asserted. Level again and
-it should read 0.00°.
+There is no stage selector. **One pick list, and every button reads it** —
+Orient Face to Side wants 3+ points, Y-Spin Face to Level wants 2+. Nothing has to be told
+which you meant, so nothing can be set wrong. Each button greys itself out
+until it has enough points, so a button that is offered is a button that
+works, and the readout at bottom right always says what *both* would do with
+the picks you have:
 
-**Export oriented STL** writes the scan back out with the orientation baked
-in, as `<scan>_oriented.stl`. It is a rigid transform of the vertices — same
-triangles, same topology, nothing resampled — so sharp edges and open
-boundaries survive exactly. Worth doing even if you carry on in this tool:
-getting a scan square is the fiddly part, and everything else you do to it
-(hole filling, CSG, registration in MeshMixer or Blender) is easier on a
-datum that already means something.
+    4 picks · to-side 1.312° (±0.007 mm) · y-spin 0.529° (±0.284 mm)
 
-**3 · Silhouette.** Extracts the side-view **outer** contour. Interior
-windows, pin holes, and lightening cuts vanish automatically — only the
-outermost outline is kept, which is exactly the "fill it solid" behavior you
-want in a subtraction tool. Parameters: `px` raster resolution (0.15 mm is
-fine), `close` closes gaps up to this size (scanner dropouts), `simp` outline
-simplification tolerance. "Export DXF" writes the outline for tracing in
-SolveSpace if you'd rather rebuild in CAD.
+Those two residuals are more use than a mode label: points spread over a flat
+side fit a plane tightly and a side-view line badly, and points along a top
+edge do the reverse — so the numbers tell you which face you are actually on.
 
-**4 · Tiers.** The real frame's bumpy, continuously varying thickness gets
-simplified into a handful of flat **thickness tiers per side** — typically
-3–5. You get **two views, one per side**: each shows where that side's
-surface sits (so bosses and reliefs stand out) and only that side's tiers.
-The left view is mirrored, so it's the frame as seen standing on its left —
-not the right-hand view with the far side showing through.
+The typical run is: **Auto-orient → pick a flat side → Orient Face to Side →
+Clear picks → pick a flat top → Y-Spin Face to Level → (optionally Flatten
+Face and Y-Centerline) → Export STL.** Nothing enforces that order; the 90°
+buttons, Undo and Export all work at any point.
 
-- **Pick base**, then click the *thinnest* part of the frame (usually the
-  magazine housing). That's the base tier: the whole silhouette, extruded to
-  that thickness. `y0` is the mid-plane it's centred on, measured at your
-  click — this matters, because an asymmetric frame's true mid-plane is not
-  where step 1's bounding-box centring put it.
-- Then **click each thicker feature, in whichever view's side it's on**. A
-  tier's outline is *everything on that side standing proud of the tier
-  below it*, anywhere on the frame — so one click on the frame body ropes in
-  every trigger-bar relief, spring channel and boss above the base at once,
-  and extrudes them all to the thickness you clicked. Click a fatter area
-  for the next tier up, and so on.
-- `+mm` is how far proud of the base that tier stands (prefilled from the
-  scan, override with calipers — the outline doesn't move when you do).
-  `over` is how much proud of the tier below a feature must be to get roped
-  in: a noise margin, 0.3 mm suits most scanners. `grow` Minkowski-grows the
-  outline for parts that have to *move* — a trigger bar needs room fore, aft
-  and up, not just clearance on its face. A tier can never grow past the
-  frame profile; where it reaches the profile it shares that edge exactly,
-  so there's no ledge between it and the base.
-- Edits to those boxes (and to `base T` / `y0`) commit when you press
-  **APPLY** or Enter, and never before — so you can tab between boxes
-  without paying for a re-cut each time, and you can force one without
-  having to click somewhere else. A badge says `applying…` while it works;
-  what's on screen until it clears is the old view.
-- Every tier is listed at the right; click a row (or right-click a view) to
-  select one and edit or delete it. Tiers keep themselves in stacking order.
-- The status line reports what the stack still leaves **under-thick**, with
-  the worst spot's coordinates. Zero means the tiers cover the whole scan;
-  anything significant means you need another tier there.
+Each move narrows the freedom the one before it left, and each reports how
+good your picks actually were as well as what it did.
 
-Thickness always rounds **up**: a feature only 0.5 mm proud of a tier gets
-pulled up to the next one. Too thick only costs grip wall thickness, too thin
-means the grip fouls the frame.
+**Coarse.** `Auto-orient` runs PCA: longest principal axis → X, thinnest
+→ Y, middle → Z. Then the 90° and Flip buttons fix the quarter-turn
+ambiguities PCA cannot resolve. Expect PCA to leave about a degree in the X-Z
+plane on an L-shaped part — that is what Y-Spin Face to Level is for.
 
-**5 · Export.** The tier model *is* a sketch-and-extrude model, so it goes
-out losslessly as CAD. The view lists every sketch and its Y range — a last
-look at what's about to be written. **EXPORT CAD** writes `<name>_cad/`:
+**Orient Face to Side.** Click **3 or more points on one face that really
+is flat** in the 3D view — a flat side wall is ideal. A red marker drops on
+each. A plane is fitted and the *smallest* rotation that squares it to Y is
+applied: it removes tilt without spinning the model about Y, so the coarse
+orientation stays put.
 
-- one DXF per sketch (base outline, each tier),
-- `all_sketches.dxf`, one layer per sketch, if you'd rather import once,
-- `build.txt` — the build sheet, with the exact Y range and depth per sketch,
-- `assembly.scad` — the whole model rebuilt in OpenSCAD, with the
-  `difference()` against your donor grip commented out at the bottom.
+The readout gives the tilt and the **RMS coplanarity of your picks**. That
+second number is the one to watch: it is your scan's own flatness plus your
+aim, and a large value means one pick missed the flat and the fit is not to be
+trusted. The readout drops to 0.000° the moment it lands — picks are stored in
+model space, so they travel with the mesh.
 
-Every tier extrudes from the *same* plane (`y0`), so in SolveSpace they share
-one workplane and differ only in depth and direction. Import, tweak the
-outlines by hand — which is the point — extrude, union.
+The fitted plane draws in red against a blue Y = 0 datum in the T and B
+panels. Square it and the red line lands parallel to the blue one. A number
+saying "0.000°" asks to be believed; two parallel lines can be checked.
 
-`clearance` is grown into the outlines and the depths, so what comes out is
-the finished subtraction solid; set it to 0 for nominal geometry. The DXFs
-use only `LINE` and `CIRCLE` entities, which every importer accepts.
+**Y-Spin Face to Level.** Click **2 or more points on a flat top or bottom
+reference** and the model spins until that face is level and the long axis
+runs straight down X. Two picks define the line exactly; more average out
+the error in each, which is the point of picking several.
 
-`circle fit mm` recognises tier islands that really are circles — grip-screw
-and pin clearances — and writes them as a true `CIRCLE` instead of a polygon.
-A 3.5 mm hole measured on a 0.2 mm raster only supports about a dozen
-vertices, so a polygon can never be rounder than that; the circle is exact,
-arrives in SolveSpace as one object you can dimension rather than twelve
-points, and OpenSCAD tessellates it at `$fn`. The clearance goes on the
-radius arithmetically instead of by re-rasterising the disc, and `build.txt`
-lists every circle's centre and diameter — handy for checking a hole came out
-the size you expected. The number is how far a loop may stray from a circle
-and still count, so about one `export px`; 0 turns the whole thing off and
-everything goes out as polygons. Only tier islands are tested — the base
-outline is left alone.
+This rotates **about Y**, not about X. That is forced, not a preference:
+once a side face is square to Y, rotating about X or Z tips it straight back
+out of square. Rotation about the locked axis is the only remaining
+freedom — and it is exactly the one that swings the long axis up and down in
+the side view. A 10° rotation about X moves the side face's normal from
+`(0, 1, 0)` to `(0, 0.985, 0.174)`; about Y it stays `(0, 1, 0)` exactly.
+`Straightening_leaves_the_locked_axis_exactly_alone` in `OrientTests` is what
+stops anyone "fixing" this later.
 
-`export px` re-measures the scan and re-cuts the tiers at a finer raster than
-step 4 works at — step 4 stays at `map px` (0.5 mm) to keep clicking
-responsive, but the output can afford better. 0.2 mm is a good default: on a
-real scan it resolves the boundaries about twice as well for a couple of
-seconds' work, and *fewer* points come out, not more, because a better-measured
-edge simplifies to a cleaner line (354 points instead of 3208, with 87% of the
-outline straight to 0.1 mm instead of 38%). It re-cuts copies, so nothing you
-picked changes; if a tier's footprint moves by more than 5% at that resolution
-it keeps its step-4 outline and the status line says which.
+Re-orienting invalidates a previous spin, so do them in that order — but
+nothing stops you going back and forth.
 
-Below about 0.1 mm you are into diminishing returns: the outlines keep
-improving slightly but the cost climbs, and the remaining error is the scan's,
-not the raster's.
+**Y-Centerline.** Pick point(s) on the RIGHT face and on the LEFT face —
+one each is enough, more per side average the scan noise out — and the model
+TRANSLATES in Y so those faces sit symmetric about the XZ plane, ready to
+slice down the middle into two symmetric halves. The picks must separate into
+exactly two tight Y-groups (±0.5 mm); anything else is rejected with the
+group count, so a stray pick cannot silently drag the centreline. Do this
+LAST: rotations re-centre on the bbox and undo it (Undo also undoes it).
 
-"Save project" stores everything (orientation, tiers, parameters) in a JSON
-you can reload later or start from for the next scan of the same frame:
-`python app.py myframe.json`. Projects saved before the Extras step was
-removed still load; their extras are dropped and the status line says so.
+## FLATTEN — de-noise a flat face onto its true plane
 
-## Using the output
+Scan noise on a face you know is flat can be removed here instead of
+eyeballed in Blender: pick 3+ points on the flat as usual, press
+**Flatten Face**, inspect the preview, tweak, **APPLY**.
 
-**SolveSpace / VCarve.** Take `<name>_cad/` into SolveSpace, adjust the
-outlines where the scan was ropey, extrude per `build.txt`, and you have a
-real parametric model you can revise later. The same DXFs are carvable
-profiles for VCarve.
+The naive "snap everything within k of the plane" fails two ways, and the
+implementation exists to avoid both:
 
-**OpenSCAD.** Open `assembly.scad` (Manifold backend), uncomment the
-`difference()` at the bottom and point it at your donor grip — exact
-geometry, seconds to run. That is also the quickest way to an STL, whether
-you want to eyeball the subtraction solid or print a fit prototype: render
-and export.
+- **Flood fill, not the infinite plane.** The snap only reaches faces
+  connected to your picks, walking face-to-face, so geometry elsewhere that
+  happens to intersect the plane is never touched. The walk is gated by
+  surface normal (within 30° of the plane, orientation-agnostic — scan
+  winding is not trustworthy) as well as by distance, which is what stops it
+  smearing a skirt up the base of every adjoining wall. Every pick seeds its
+  own island: for a face broken into multiple strips (serrations, grooves),
+  put one pick per strip and all of them flatten to the single common plane
+  in one operation.
+- **Feathering in distance space, not perimeter space.** Snap strength is a
+  smoothstep of each vertex's own |distance|: full inside the `floor` (the
+  noise band), fading to zero at the `ceiling` (k). A true flat — including
+  one ending at a sharp box edge — sits entirely inside the noise band, so it
+  snaps at full strength right up to the arris. A gentle curve leaves the
+  band smoothly, so the correction fades smoothly instead of printing a
+  crease at the k-boundary.
 
-**Blender** is still fine if you'd rather boolean meshes — export the STL
-from OpenSCAD first, then Boolean modifier, Difference, solver "Manifold".
+**Preview before commit.** Captured faces highlight **green** in all four
+panels. Pockets completely surrounded by the capture but not part of it
+highlight **yellow** — enclaves. A yellow patch is either a genuine feature
+(leave it), a spot the normal gate rejected (raise the floor), or a dent
+deeper than the ceiling; the point is that it is never invisible. The
+**force-flatten enclaves** checkbox (off by default) snaps the yellow
+pockets onto the plane wholesale, however far out their verts sit — for
+scanner blobs and dents living inside a flat. The feathered band that leads
+into a forced enclave is pulled to full strength with it (the "halo", also
+shown yellow — the highlight is exactly the force's reach), which prevents
+a raised ring forming around the erased blob. Detection is unchanged; only
+what happens to enclaves changes, and the status line says how many verts it
+will force. The status line reports verts, islands, RMS before → after, max
+move, and enclave count. Nothing moves until APPLY; Esc or Discard drops the
+preview; Undo reverses an apply exactly.
 
-Clearance guidance: the `clearance` parameter is per-side. ~0.10–0.20 mm for
-FDM prints, ~0.05–0.10 mm for CNC hardwood plus finish allowance. Print a
-test-fit before cutting wood; edit one number and rebuild.
+**The two boxes.** `floor` pre-fills from your picks' plane-fit RMS ×3 — the
+scan's measured noise — and `ceiling` defaults to 0.3 mm. Arrow keys step
+±0.1 mm above 0.1 and halve/double below it (0.21 → 0.11 → 0.055 → 0.0275,
+and exactly back up); the preview recomputes on arrow press, Enter, tab-out,
+the button, or a pick edit — never on a drag, and the button greys when the
+shown preview is already current. The plane itself is refined from the whole
+captured region (IRLS), so the picks only need to be roughly placed.
 
-## Notes & limits
+The plane is fitted wherever the face lies — flattening neither requires nor
+disturbs orientation. Run it after squaring and the face becomes a true
+Y = const datum. After an APPLY the export message stops claiming "nothing
+resampled" and says how many verts were flattened instead.
 
-- The rebuild is 2.5D per side: each tier is a flat extrusion, and the two
-  sides are independent (the solid is not symmetric about Y=0). Edge rounds
-  and chamfers on the real frame become steps — a superset of the frame,
-  which for a subtraction solid just means harmless extra internal clearance.
-  Genuinely non-2.5D features (angled dovetails, tapered magwell mouths) are
-  a cube in Blender, subtracted from the donor grip alongside this solid.
-- A tier's outline is clipped to the silhouette, so `grow` cannot push it
-  past the frame profile. Where the frame exits the grip, extend it in
-  Blender.
-- There used to be an **Extras** step — tilted boxes for the magazine path,
-  Y-cylinders for grip screws, unioned into the solid. It is gone. Boxes in
-  Blender do that job better and there is no reason to draw them here.
-- Thicknesses are measured from the scan but noisy; override with caliper
-  numbers. The outline a tier covers never depends on that override.
-- The silhouette keeps only the largest outer contour: crop turntable junk and
-  disconnected debris from the scan beforehand (MeshMixer select+discard).
-- Files: `app.py` (GUI), `core.py` (pipeline, importable for scripting),
-  `meshio_lite.py` (STL/OBJ/PLY I/O), `make_synthetic.py` +
-  `synthetic_frame_scan.stl` (test data), `test_pipeline.py` / `test_gui.py`
-  (self-tests; run with `python test_pipeline.py`).
+## Build
+
+- `MeshOrient.Core` — all the maths. Mesh I/O, eigen/plane/line fitting, PCA,
+  ray-mesh intersection, the alignment moves, and the flatten flood
+  (exact-bit weld + face adjacency, cached per mesh). No Avalonia and no GL:
+  that is what makes every measurement testable without a window.
+- `MeshOrient.App` — Avalonia 12 + Silk.NET.OpenGL.
+- `MeshOrient.Core.Tests` — MSTest, run with `dotnet test`.
+
+One `OpenGlControlBase` with four `glViewport` passes, not four GL controls:
+each Avalonia GL control owns its own context, so a 760k-triangle scan would
+be uploaded four times. Re-orienting changes a uniform matrix, never the
+vertex buffer, which is what keeps the rotate buttons instant on a big scan.
+
+Picking is brute-force Möller-Trumbore across every triangle, chunked over
+cores. No BVH: it runs on a *click*, not per frame, and a few milliseconds is
+imperceptible where a tree to build and keep in sync is not.
+
+## Tests
+
+`dotnet test` — the main fixture is `synthetic_frame_scan.stl`, a mock part
+with known dimensions and deliberate scan defects (0.05 mm vertex jitter, 2%
+of triangles dropped). The load-bearing ones:
+
+- **Orient Face to Side recovers a known tilt.** Introduce a 1.3° tilt, pick
+  four points on the flat right wall, and it comes back to under 0.05° —
+  measured 1.312° → 0.006°, with the wall then reading one thickness end to
+  end within 0.03 mm.
+- **Y-Spin Face to Level** recovers a known 7° roll to 0.026°, leaves the
+  locked axis fixed to 1e-9, and levels the top reference to 0.07 mm.
+- **PCA is pose-invariant**: the same scan presented in three wildly different
+  poses auto-orients to bounding boxes agreeing to 0.01 mm. Repeatability
+  matters more here than accuracy — if it drifted, two exports of the same
+  part would land in different places.
+- **The readout survives every pick count**, including a single pick on a
+  freshly loaded scan, so an exception on the pick path can never take the
+  window down.
+- **FLATTEN's two fixes, as A/B tests.** A noisy box top flattens with its
+  arris exactly on the plane and its wall untouched to the last bit; a
+  flat-into-fillet strip flattened with the hard snap kinks 6× worse than
+  with the feathering (0.19 vs 0.03 mm). A wall fixture with a boss, a rib, a
+  through-window and a perpendicular flange floods in 70 ms and reports
+  exactly two enclaves — the boss and the rib, never the window or flange.
+- **The synthetic is cracked** (each quad's vertex copies jittered
+  independently), so it cannot host a flood. It stays as the hostile-mesh
+  fixture — adjacency must survive its cracks and holes — while flood tests
+  run on indexed fixtures round-tripped through real STL, which is what
+  scanner-cleanup output actually looks like.
+- **The full run**, in `OrientStateTests`: load a deliberately crooked scan,
+  auto-orient, pick four wall points, square twice (0.291° → 0.0000°), export,
+  re-import and confirm the written STL is already square.
+
+## Not here
+
+Silhouettes, thickness tiers, DXF, clearance offsets, project files. This
+tool orients meshes and stops.

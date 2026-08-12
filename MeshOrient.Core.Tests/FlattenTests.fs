@@ -8,13 +8,12 @@ open MeshOrient.Core
 /// Purpose-built fixtures for the failure modes FLATTEN exists to avoid,
 /// generated deterministically so every assertion is against known geometry.
 ///
-/// The frame2solid synthetic is NOT usable here, and discovering that was one
-/// of this suite's first findings: make_synthetic.py appends fresh corner
+/// The synthetic scan fixture is NOT usable here: it appends fresh corner
 /// vertices per quad and jitters every copy independently, so adjacent quads
 /// do not share exact positions — the mesh is cracked at every quad boundary
 /// and a flood can never leave the quad it started in. Real inputs to this
-/// tool are watertight MeshMixer exports with bit-identical shared vertices
-/// (verified on the g21 scan), which these indexed fixtures model correctly.
+/// tool are watertight MeshMixer exports with bit-identical shared vertices,
+/// which these indexed fixtures model correctly.
 module private FlattenFixtures =
 
     /// Deterministic gaussian jitter (Box-Muller over a seeded Random).
@@ -219,7 +218,7 @@ type FlattenTests () =
 
     [<TestMethod>]
     member _.Adjacency_tolerates_the_cracked_synthetic () =
-        // The f2s synthetic is cracked at quad boundaries (independent jitter
+        // The synthetic is cracked at quad boundaries (independent jitter
         // per vertex copy) and full of deliberate holes. Not a useful flood
         // fixture — but adjacency must build on it without choking, because
         // hostile meshes are a thing.

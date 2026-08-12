@@ -68,8 +68,7 @@ type OrientState() =
     // Picks live in MODEL space, not world space. That means a re-orientation
     // carries them along for free: press SQUARE twice and the second reading
     // is 0.000 degrees, because the picks moved with the mesh they were taken
-    // on. f2s has to do this by hand (`level_pts` are rewritten through every
-    // transform); here it falls out of the representation.
+    // on — it falls out of the representation.
     let picks = ResizeArray<Pick>()
 
     let picksChanged () = picksVersion <- picksVersion + 1

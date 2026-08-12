@@ -1,6 +1,6 @@
 /// Mesh file I/O: STL (binary + ASCII), OBJ and PLY in; binary STL out.
 ///
-/// Self-contained on purpose, the way f2s's `meshio_lite.py` is. A scan loader
+/// Self-contained on purpose. A scan loader
 /// and an STL writer are a few hundred lines; a mesh library is a dependency
 /// that has to be kept current forever. Nothing here needs a mesh kernel.
 module MeshOrient.Core.MeshIO
@@ -286,8 +286,7 @@ let private suffixedPathFor (suffix : string) (sourcePath : string) =
     let file = Path.GetFileNameWithoutExtension sourcePath + suffix + ".stl"
     if String.IsNullOrEmpty dir then file else Path.Combine(dir, file)
 
-/// `<name>_oriented.stl` beside the source file — the same naming f2s uses,
-/// so the two tools' outputs drop into a workflow interchangeably. Always
+/// `<name>_oriented.stl` beside the source file. Always
 /// the PURE rigid transform of the scan, no flattens.
 let orientedPathFor = suffixedPathFor "_oriented"
 

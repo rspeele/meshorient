@@ -49,8 +49,8 @@ module Vec3 =
         let n = length a
         if n < 1e-300 then zero else a / n
 
-    /// Component `i` (0 = X, 1 = Y, 2 = Z). Lets the level step take an axis
-    /// index the way `core.level_rotation(points, axis=1)` does in f2s.
+    /// Component `i` (0 = X, 1 = Y, 2 = Z). Lets the alignment moves take an
+    /// axis index instead of hard-coding one.
     let item (i : int) (a : Vec3) =
         match i with
         | 0 -> a.X
@@ -75,10 +75,8 @@ module Vec3 =
 
 /// A 3x3 matrix stored as three ROW vectors.
 ///
-/// Applied to column vectors: `apply m v = m * v`. That matches f2s, where
-/// `verts @ M.T` is numpy's way of writing the same thing for a row-major
-/// vertex array, so a rotation computed here composes in the same order as the
-/// Python it was ported from: `mul r2 r1` applies r1 first.
+/// Applied to column vectors: `apply m v = m * v`, so `mul r2 r1` applies
+/// r1 first.
 [<Struct; IsReadOnly>]
 type Mat3 =
     { R0 : Vec3; R1 : Vec3; R2 : Vec3 }
@@ -116,8 +114,7 @@ module Mat3 =
 
     let det (m : Mat3) = Vec3.dot m.R0 (Vec3.cross m.R1 m.R2)
 
-    /// Rotation about X by `radians`. Same convention as f2s's
-    /// `core.rot_matrix("x", deg)`.
+    /// Rotation about X by `radians`.
     let rotX (radians : float) =
         let c, s = cos radians, sin radians
         {   R0 = { X = 1.0; Y = 0.0; Z = 0.0 }
@@ -144,9 +141,8 @@ module Mat3 =
         | 2 -> rotZ r
         | _ -> invalidArg "axis" $"axis index must be 0, 1 or 2, not {axis}"
 
-    /// Rotation of `angle` radians about the unit vector `k` (Rodrigues).
-    /// `I + sin(t) K + (1 - cos t) K^2`, exactly as f2s builds it in
-    /// `core.level_rotation`.
+    /// Rotation of `angle` radians about the unit vector `k` (Rodrigues):
+    /// `I + sin(t) K + (1 - cos t) K^2`.
     let aboutAxis (k : Vec3) (angle : float) =
         let k = Vec3.normalize k
         if Vec3.lengthSq k < 0.5 then identity      // no axis => no rotation

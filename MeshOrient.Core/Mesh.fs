@@ -26,10 +26,10 @@ module Bounds =
 /// triangle.
 ///
 /// STL arrives as a triangle soup (3N vertices, indices 0..3N-1) and is kept
-/// that way. f2s welds duplicate vertices on load, but nothing here needs it:
-/// rendering wants flat normals, the raycast walks triangles, and STL export
-/// writes triangles back out. Welding would cost a sort over millions of
-/// vertices to make every downstream step marginally slower.
+/// that way — nothing here needs the duplicates welded: rendering wants flat
+/// normals, the raycast walks triangles, and STL export writes triangles back
+/// out. Welding would cost a sort over millions of vertices to make every
+/// downstream step marginally slower.
 type Mesh =
     {   Vertices : Vec3[]
         /// 3 entries per triangle, indexing `Vertices`.

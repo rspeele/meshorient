@@ -5,13 +5,11 @@ open MeshOrient.Core
 
 /// Shared test data and probes.
 ///
-/// The fixture is frame2solid's `synthetic_frame_scan.stl` — a mock pistol
+/// The fixture is `synthetic_frame_scan.stl` — a mock pistol
 /// frame with known dimensions, deliberate scan defects (0.05 mm vertex
-/// jitter, 2% of triangles dropped) and non-axis-aligned features. Reusing it
-/// rather than inventing a new one means meshorient and f2s are measured
-/// against the same object, so the two can be cross-checked directly.
+/// jitter, 2% of triangles dropped) and non-axis-aligned features.
 ///
-/// Geometry that matters here, from `make_synthetic.py` (mm):
+/// Geometry that matters here (mm):
 ///   top rail   X -85..85, Z 30..50, Y -13..13   <- the flat TOP reference
 ///   grip walls X -40..40, Z -60..30, outer Y +-11
 ///   magwell window   X -20..10, Z -40..-10  (a hole in both walls)
@@ -31,8 +29,8 @@ module Fixtures =
     /// The cluster is not decoration: the synthetic drops 2% of its triangles
     /// at random, so a single ray falls through a hole often enough to make a
     /// test flaky, and when it does it hits the inner wall and reports a wildly
-    /// wrong answer. Taking the outermost of several samples is the same thing
-    /// f2s's `core.sample_maps(r_mm=1.2)` does, for the same reason.
+    /// wrong answer. Taking the outermost of several samples rides over the
+    /// holes.
     let private sampleOuter (mesh : Mesh) (origin : Vec3) (dir : Vec3) (spread : Vec3 * Vec3) =
         let du, dv = spread
         let offsets =

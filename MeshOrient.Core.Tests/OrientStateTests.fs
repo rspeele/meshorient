@@ -139,9 +139,9 @@ type OrientStateTests () =
                 Assert.IsTrue(again.TiltDegrees < 0.05,
                               $"a squared model must read square, got {again.TiltDegrees}")
 
-            // Export, then check the written file is genuinely square by
-            // measuring it the same way f2s's test does. No flattens were
-            // applied, so there must be no _cleaned companion.
+            // Export, then re-import and measure the written file to check it
+            // is genuinely square. No flattens were applied, so there must be
+            // no _cleaned companion.
             let out, cleaned = s.ExportStl()
             Assert.IsTrue(cleaned.IsNone, "no flattens -> no _cleaned file")
             try

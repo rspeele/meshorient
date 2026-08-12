@@ -43,9 +43,8 @@ type RaycastTests () =
 [<TestClass>]
 type SquareTests () =
 
-    /// The regression f2s's `test_gui.py` runs, ported: introduce a tilt PCA
-    /// would plausibly have left behind, then square it back up off four picks
-    /// on the grip's flat right wall.
+    /// Introduce a tilt PCA would plausibly have left behind, then square it
+    /// back up off four picks on the grip's flat right wall.
     [<TestMethod>]
     member _.Recovers_a_deliberately_introduced_tilt () =
         let tilt = Mat3.mul (Mat3.rotDegrees 0 1.2) (Mat3.rotDegrees 2 -0.6)
@@ -108,8 +107,8 @@ type SquareTests () =
 
     [<TestMethod>]
     member _.Tilt_components_split_into_the_two_visible_leans () =
-        // f2s draws these two numbers on the front and top views: a tilt about
-        // X leans the model in the back view, one about Z leans it in the top.
+        // A tilt about X leans the model in the back view, one about Z leans
+        // it in the top.
         let tilted =
             Mesh.transform (Mat3.mul (Mat3.rotDegrees 0 1.2) (Mat3.rotDegrees 2 -0.6))
                            Vec3.zero Fixtures.synthetic.Value
