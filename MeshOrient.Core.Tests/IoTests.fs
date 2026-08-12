@@ -181,7 +181,7 @@ type IoTests () =
         let b = Mesh.bounds m
         printfn "synthetic: %d triangles, bbox %A .. %A" m.TriangleCount b.Min b.Max
         Assert.IsTrue(m.TriangleCount > 100_000, $"expected a dense scan, got {m.TriangleCount}")
-        // From make_synthetic.py, plus 0.05 mm of vertex jitter.
+        // The fixture's documented dimensions, plus 0.05 mm of vertex jitter.
         Assert.AreEqual(-85.0, b.Min.X, 0.3, "min X")
         Assert.AreEqual(85.0, b.Max.X, 0.3, "max X")
         Assert.AreEqual(-14.5, b.Min.Y, 0.3, "min Y (left round boss)")
