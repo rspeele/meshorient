@@ -27,14 +27,25 @@ type OrientStateTests () =
         s.Load synthetic |> ignore
         s
 
+    /// Loading must NOT move the model. A scan that is only flattened and
+    /// re-exported has to come back in the coordinate frame it arrived in —
+    /// the user's other Blender objects are registered against it. (This
+    /// asserts the opposite of what it used to: an eager load-time centring
+    /// shifted every flatten-only export by minus the bbox centre.) Centring
+    /// starts with the FIRST orientation command, which recentres anyway.
     [<TestMethod>]
-    member _.Loading_centres_the_model_on_the_origin () =
+    member _.Loading_keeps_the_scan_in_its_source_coordinates () =
         let s = loaded ()
-        let c = Bounds.centre s.Bounds
-        printfn "centre after load: %A" c
-        Assert.AreEqual(0.0, c.X, 1e-6, "X")
-        Assert.AreEqual(0.0, c.Y, 1e-6, "Y")
-        Assert.AreEqual(0.0, c.Z, 1e-6, "Z")
+        Assert.AreEqual(0.0, Vec3.length s.Offset, 1e-12, "no translation on load")
+        let raw = Mesh.bounds (MeshIO.load synthetic)
+        let b = s.Bounds
+        printfn "load frame: centre %A (source centre %A)" (Bounds.centre b) (Bounds.centre raw)
+        Assert.AreEqual(raw.Min.Y, b.Min.Y, 1e-12, "bounds are the file's own")
+        Assert.AreEqual(raw.Max.Z, b.Max.Z, 1e-12, "bounds are the file's own")
+        // The synthetic's bbox centre is NOT the origin — proving the old
+        // behaviour is really gone, not accidentally reproduced.
+        Assert.IsTrue(Vec3.length (Bounds.centre raw) > 1.0,
+                      "fixture must have an off-origin centre for this test to bite")
 
     [<TestMethod>]
     member _.Rotating_recentres_so_the_panels_stay_framed () =
@@ -70,14 +81,17 @@ type OrientStateTests () =
         match s.PickAt(rayFromRight 0.0 20.0) with
         | None -> Assert.Fail "expected the ray to hit the right wall"
         | Some before ->
-            s.ApplyRotation(Mat3.rotDegrees 2 90.0)
+            let r = Mat3.rotDegrees 2 90.0
+            s.ApplyRotation r
             let after = s.PicksWorld[0]
             printfn "pick before %A, after a 90 deg Z rotation %A" before after
-            // Rotating about Z about the (centred) origin: the pick must land
-            // where that same bit of surface landed, not stay put.
-            Assert.AreEqual(-before.Y, after.X, 0.02, "pick X after rotation")
-            Assert.AreEqual(before.X, after.Y, 0.02, "pick Y after rotation")
-            Assert.AreEqual(before.Z, after.Z, 0.02, "pick Z unchanged by a Z rotation")
+            // The pick must land exactly where the state's own transform put
+            // that piece of surface: rotate the old world point (load applies
+            // no offset now) and add the post-rotation centring offset.
+            let expect = Mat3.apply r before + s.Offset
+            Assert.AreEqual(expect.X, after.X, 1e-9, "pick X after rotation")
+            Assert.AreEqual(expect.Y, after.Y, 1e-9, "pick Y after rotation")
+            Assert.AreEqual(expect.Z, after.Z, 1e-9, "pick Z after rotation")
 
     [<TestMethod>]
     member _.Square_needs_three_picks_and_says_so () =
@@ -246,7 +260,6 @@ type OrientStateTests () =
         | Error e -> Assert.Fail e
         | Ok r ->
             printfn "centerline: shift %+.3f, faces at +-%.3f" r.ShiftY r.HalfWidth
-            Assert.IsTrue(abs r.ShiftY > 0.05, "the synthetic's mid-plane is off the bbox centre")
             let w = s.PicksWorld
             Assert.AreEqual(0.0, w[0].Y + w[1].Y, 1e-9, "picks must land symmetric about Y=0")
             Assert.AreEqual(11.0, r.HalfWidth, 0.4, "the grip walls sit at +-11")

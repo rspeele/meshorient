@@ -265,11 +265,16 @@ type MainWindow() as this =
         else
             try
                 let oriented, cleaned = state.ExportStl()
+                let frame =
+                    if state.Rotation = MeshOrient.Core.Mat3.identity
+                       && MeshOrient.Core.Vec3.length state.Offset < 1e-12 then
+                        "in the scan's ORIGINAL coordinates (nothing was moved)"
+                    else "on the oriented datum"
                 match cleaned with
                 | Some c ->
-                    setStatus $"Wrote 2 files: {Path.GetFileName oriented} (orientation only — the scan untouched) and {Path.GetFileName c} (%d{state.FlattenedVertexCount} verts flattened). Same {state.TriangleCount} triangles in both."
+                    setStatus $"Wrote 2 files {frame}: {Path.GetFileName oriented} (orientation only — the scan untouched) and {Path.GetFileName c} (%d{state.FlattenedVertexCount} verts flattened). Same {state.TriangleCount} triangles in both."
                 | None ->
-                    setStatus $"Wrote {oriented} — the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned."
+                    setStatus $"Wrote {oriented} {frame} — the same {state.TriangleCount} triangles, rigidly transformed. Nothing resampled, so edges and hole boundaries are exactly as scanned."
             with e ->
                 setStatus $"Export failed: {e.Message}"
 

@@ -574,6 +574,15 @@ type FlattenTests () =
                           $"_cleaned should be flat ({rawSpread} -> {cleanSpread})")
             let a, b = MeshIO.load oriented, MeshIO.load cleaned.Value
             Assert.AreEqual(a.TriangleCount, b.TriangleCount, "same triangles in both")
+
+            // No orientation command was given, so the export must sit in the
+            // SOURCE coordinate frame — the whole point of not centring on
+            // load. The _oriented file is the input, byte-faithful.
+            let src = MeshIO.load stl
+            let sb, ab = Mesh.bounds src, Mesh.bounds a
+            Assert.AreEqual(sb.Min.X, ab.Min.X, 1e-12, "no hidden translation")
+            Assert.AreEqual(sb.Max.Y, ab.Max.Y, 1e-12, "no hidden translation")
+            Assert.AreEqual(sb.Min.Z, ab.Min.Z, 1e-12, "no hidden translation")
         finally
             for f in toDelete do
                 if File.Exists f then File.Delete f

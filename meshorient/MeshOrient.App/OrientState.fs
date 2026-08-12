@@ -85,8 +85,15 @@ type OrientState() =
         | None -> bounds <- Bounds.empty
 
     /// Put the bounding-box centre back on the origin. Run after every
-    /// rotation, as f2s does: it keeps the orthographic panels framed and the
-    /// orbit pivot on the model instead of drifting off into space.
+    /// ROTATION — and only then. Loading does NOT centre: a scan that is only
+    /// flattened and re-exported must come back in the coordinate frame it
+    /// arrived in, because the user's other Blender objects are registered
+    /// against that frame (an eager load-time centre shifted every
+    /// flatten-only export by minus the bbox centre, user-reported). The
+    /// views never needed it — panels and orbit both frame on Bounds.centre
+    /// wherever the model sits. The first orientation command is the moment
+    /// the source frame stops being meaningful, so that is when centring
+    /// starts.
     let recentre () =
         match mesh with
         | Some m ->
@@ -147,7 +154,7 @@ type OrientState() =
         dropPreview ()
         flattenedVerts <- 0
         pristineVerts <- m.Vertices
-        recentre ()
+        reframe ()                    // frame it where it IS — no centring
         m
 
     // --------------------------------------------------------- transforms

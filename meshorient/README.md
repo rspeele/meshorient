@@ -16,6 +16,13 @@ rigidly transformed, nothing resampled, no flattens even if some were
 applied — and `<name>_cleaned.stl` when flattens are baked in, with the same
 orientation. The cleanup is never the price of the raw geometry.
 
+**Loading does not move the model.** Centring on the bbox happens on the
+FIRST orientation command, not before — so a scan you only flatten and
+re-export comes back in the exact coordinate frame it arrived in, ready to
+drop onto Blender objects registered against it. The export status names the
+frame it wrote ("original coordinates" vs "the oriented datum"). Note
+Y-Centerline is a deliberate translation, so it counts as orientation.
+
 ## The window
 
 Three fixed orthographic panels down the left, one orbiting 3D view on the
