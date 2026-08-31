@@ -181,6 +181,22 @@ disturbs orientation. Run it after squaring and the face becomes a true
 Y = const datum. After an APPLY the export message stops claiming "nothing
 resampled" and says how many verts were flattened instead.
 
+**Snap to the true axis plane.** When the picks' plane sits within a couple
+of degrees of a true axis-normal plane (in world space — the orientation the
+export will use), a **snap to true Y plane** checkbox appears (the axis
+letter is live), checked by default. A face that close to an axis is
+evidently *meant* to be axis-true, and the fit residual is pick noise, not
+design — but flattening onto the fitted plane leaves each such face flat yet
+a fraction of a degree off its siblings, which is exactly what makes a cube
+boolean in Blender later sit with one corner proud of the face and another
+below flush. Snapped, the verts are sent onto the plane with *exactly* the
+axis normal (through the fitted origin), so every snapped flat comes out
+truly parallel. Membership is unchanged — the flood, feather and refit still
+judge the face against its own free fit, so the capture is identical either
+way — and the status line reports how far off-axis the free fit was.
+Visually the result is indistinguishable from the free fit; the CSG later is
+not.
+
 ## Build
 
 - `MeshOrient.Core` — all the maths. Mesh I/O, eigen/plane/line fitting, PCA,

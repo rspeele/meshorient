@@ -112,6 +112,16 @@ let buildAdjacency (m : Mesh) : Adjacency =
 
 // ------------------------------------------------------------------- flatten
 
+/// A free-fitted plane within this many degrees of a coordinate axis is
+/// eligible for "snap to true axis plane". Tight enough that no genuine
+/// chamfer or draft angle qualifies, loose enough to cover the fit residual
+/// pick noise leaves on a face that was MEANT to be axis-true. Within it a
+/// snap is visually indistinguishable from the free fit — but the flats it
+/// produces are exactly parallel to each other, which is what downstream
+/// CSG against true cubes needs (a merely-flat plane a fraction of a degree
+/// off leaves a cube corner proud of the face and another below flush).
+let axisSnapThresholdDegrees = 2.0
+
 type Params =
     {   /// Full-snap zone: |distance| <= this is treated as pure noise and
         /// snapped all the way. Default to ~3x the plane-fit RMS of the picks
@@ -130,13 +140,31 @@ type Params =
         /// dents living inside a flat: surrounded, but beyond the ceiling's
         /// reach. Off by default because an enclave is just as often a
         /// genuine feature.
-        ForceEnclaves : bool }
+        ForceEnclaves : bool
+        /// When set, verts are sent onto the plane with EXACTLY this normal
+        /// (model space, unit-ish; sign is reconciled with the picks) through
+        /// the fitted origin, instead of onto the free fit. The snap changes
+        /// the DESTINATION only, never the membership: the flood, the feather
+        /// weights and the refit all keep asking "is this vert part of the
+        /// flat?" against the flat's own free fit — a uniformly tilted flat
+        /// is still perfectly flat to itself, and measuring membership
+        /// against the snapped plane instead was tried and fragments the
+        /// capture of any face whose tilt-induced deviation crosses the
+        /// ceiling. For flats that are SUPPOSED to be true-normal to an
+        /// axis: the free fit gets within a fraction of a degree, and that
+        /// fraction is exactly what makes flattened faces non-parallel to
+        /// each other. None = flatten onto the free fit, the previous
+        /// behavior.
+        SnapNormal : Vec3 option }
 
 let defaults =
-    { FloorMm = 0.075; CeilingMm = 0.3; NormalGateDegrees = 30.0; ForceEnclaves = false }
+    {   FloorMm = 0.075; CeilingMm = 0.3; NormalGateDegrees = 30.0
+        ForceEnclaves = false; SnapNormal = None }
 
 type Preview =
-    {   /// The refined plane (unit normal, oriented outward like the picks).
+    {   /// The plane the verts are sent to (unit normal, oriented outward
+        /// like the picks): the refined free fit, or Params.SnapNormal
+        /// exactly when a snap was requested.
         PlaneNormal : Vec3
         PlaneOrigin : Vec3
         /// Faces the flood captured — the green highlight.
@@ -163,7 +191,12 @@ type Preview =
         ForcedVertexCount : int
         RmsBeforeMm : float
         RmsAfterMm : float
-        MaxMoveMm : float }
+        MaxMoveMm : float
+        /// Some = the plane was snapped to Params.SnapNormal, carrying the
+        /// angle in degrees between the FREE fit's normal and the snap
+        /// direction — how far off-axis the flat would have come out without
+        /// the snap. None = free fit used.
+        SnapOffAngleDegrees : float option }
 
 /// Compute what a flatten WOULD do. Pure; nothing is modified.
 ///
@@ -180,7 +213,15 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     let cosGate = cos (prm.NormalGateDegrees * Math.PI / 180.0)
 
     let orient (n : Vec3) = if Vec3.dot n normalHint < 0.0 then -n else n
+    let snapDir =
+        prm.SnapNormal
+        |> Option.map Vec3.normalize
+        |> Option.filter (fun s -> Vec3.lengthSq s > 0.5)
     let fit0 = Geometry.fitPlane planePts
+    // planeN/planeO are the FREE fit throughout: membership — flood, feather
+    // weights, refit votes — is always the face judged against its own
+    // plane. The snap, when present, redirects only where verts are SENT
+    // (targetN, below).
     let mutable planeN = orient fit0.Normal
     let mutable planeO = fit0.Centroid
 
@@ -283,6 +324,16 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
             planeN <- orient (snd eigen[0])
             planeO <- mean
             Array.fill dist 0 dist.Length nan       // distances are stale
+
+    // ---- the TARGET plane: where verts are sent, and the plane the result
+    // is reported against. The free fit unless snapping — then the snap
+    // direction exactly, through the same origin (planeO is the weighted
+    // region mean, so it lies on both planes). A face fully inside the noise
+    // floor of its own fit therefore lands EXACTLY on the axis-true plane,
+    // tilt corrected and all — which is the point: flat was never the
+    // problem, parallel was.
+    let targetN = match snapDir with Some s -> orient s | None -> planeN
+    let inline targetDistOf cid = Vec3.dot (posOf cid - planeO) targetN
 
     // ---- enclaves: connected components of NON-captured faces that are
     // completely surrounded by the capture.
@@ -416,6 +467,11 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     // vert, ever. The RMS is measured over the REGION verts (the flat being
     // cleaned); forced halo verts land at zero and show up in it, enclave
     // interiors do not — they were never part of the flat's noise.
+    //
+    // Membership (which verts, at what weight) is the free fit's `distOf`;
+    // the distance actually corrected is the TARGET plane's. Same thing
+    // unless snapping — then before/after honestly includes the tilt the
+    // snap removes, and MaxMoveMm reports the true excursion.
     let moves = ResizeArray<struct (int * Vec3)>()
     let mutable movedCanon = 0
     let mutable maxMove = 0.0
@@ -423,8 +479,8 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     let mutable sumSqAfter = 0.0
     let mutable measured = 0
     for c in regionVerts do
-        let d = distOf c
-        if abs d <= ceiling then
+        if abs (distOf c) <= ceiling then
+            let d = targetDistOf c
             let w = if Double.IsNaN wArr[c] then 0.0 else wArr[c]
             sumSqBefore <- sumSqBefore + d * d
             let residual = d * (1.0 - w)
@@ -433,10 +489,10 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     for c in touchedVerts do
         let w = wArr[c]
         if w > 1e-9 then
-            let d = distOf c
+            let d = targetDistOf c
             movedCanon <- movedCanon + 1
             maxMove <- max maxMove (w * abs d)
-            let np = posOf c - planeN * (w * d)
+            let np = posOf c - targetN * (w * d)
             for k in adj.CopyStart[c] .. adj.CopyStart[c + 1] - 1 do
                 moves.Add(struct (adj.CopyItems[k], np))
 
@@ -444,7 +500,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     for f in 0 .. nf - 1 do
         if captured[f] then capturedList.Add f
 
-    {   PlaneNormal = planeN
+    {   PlaneNormal = targetN
         PlaneOrigin = planeO
         CapturedFaces = capturedList.ToArray()
         EnclaveFaces = enclaveFaces.ToArray()
@@ -456,7 +512,10 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         ForcedVertexCount = forcedCanon
         RmsBeforeMm = if measured = 0 then 0.0 else sqrt (sumSqBefore / float measured)
         RmsAfterMm = if measured = 0 then 0.0 else sqrt (sumSqAfter / float measured)
-        MaxMoveMm = maxMove }
+        MaxMoveMm = maxMove
+        SnapOffAngleDegrees =
+            snapDir |> Option.map (fun s ->
+                acos (Math.Clamp(abs (Vec3.dot planeN s), 0.0, 1.0)) * 180.0 / Math.PI) }
 
 /// Commit a preview: a new mesh with the moves applied, plus the inverse
 /// (index, old position) list that undoes it. Region-sized, not mesh-sized,

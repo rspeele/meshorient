@@ -453,6 +453,128 @@ type FlattenTests () =
         Assert.IsTrue(annulusWorst > 0.15,
                       "without force the annulus rightly keeps its feathered residual")
 
+    // -------------------------------------------------------- axis snapping
+
+    /// SnapNormal: a flat that is SUPPOSED to be axis-true comes out with a
+    /// free-fit normal a fraction of a degree off — flat, but not parallel
+    /// to its siblings, which is what left cube corners proud in downstream
+    /// CSG. Snapped, the plane normal is the axis EXACTLY and the flatten
+    /// still cleans the noise just as well.
+    [<TestMethod>]
+    member _.Snap_to_axis_yields_an_exactly_axis_normal_plane () =
+        // Tilt the wall half a degree about X: the plate's true normal is
+        // now measurably off +Y — a stand-in for the sub-degree residual a
+        // real orientation leaves — and well inside the snap threshold.
+        let m = Mesh.transform (Mat3.rotDegrees 0 0.5) Vec3.zero (FlattenFixtures.wall sigma)
+        let adj = Flatten.buildAdjacency m
+        let seeds =
+            [| FlattenFixtures.faceNearXZ m 5.0 5.0
+               FlattenFixtures.faceNearXZ m 55.0 10.0
+               FlattenFixtures.faceNearXZ m 5.0 75.0 |]
+        let pts = seeds |> Array.map (fun f ->
+            let struct (a, b, c) = Mesh.triangle m f
+            (a + b + c) / 3.0)
+        let prm = { Flatten.defaults with FloorMm = 3.0 * sigma; CeilingMm = 0.3 }
+
+        let free = Flatten.preview m adj seeds pts Vec3.unitY prm
+        let snapped = Flatten.preview m adj seeds pts Vec3.unitY { prm with SnapNormal = Some Vec3.unitY }
+        let offDeg (n : Vec3) = acos (Math.Clamp(abs n.Y, 0.0, 1.0)) * 180.0 / Math.PI
+        printfn "free normal %.3f° off Y; snapped reports %.3f° and uses (%g, %g, %g)"
+                (offDeg free.PlaneNormal)
+                (defaultArg snapped.SnapOffAngleDegrees nan)
+                snapped.PlaneNormal.X snapped.PlaneNormal.Y snapped.PlaneNormal.Z
+
+        // The free fit follows the tilt; unsnapped, that is what you get.
+        Assert.IsTrue(free.SnapOffAngleDegrees.IsNone, "no snap requested = none reported")
+        Assert.IsTrue(offDeg free.PlaneNormal > 0.4 && offDeg free.PlaneNormal < 0.6,
+                      $"free fit should track the 0.5° tilt, got {offDeg free.PlaneNormal}")
+
+        // Snapped: the normal is the axis EXACTLY, and the off-angle report
+        // matches what the free fit wanted.
+        Assert.IsTrue(snapped.PlaneNormal.X = 0.0 && snapped.PlaneNormal.Z = 0.0
+                      && abs snapped.PlaneNormal.Y = 1.0,
+                      "snapped plane must be EXACTLY axis-normal")
+        match snapped.SnapOffAngleDegrees with
+        | None -> Assert.Fail "snap requested but not reported"
+        | Some off -> Assert.IsTrue(off > 0.4 && off < 0.6,
+                                    $"reported off-angle should be the tilt, got {off}")
+
+        // Same capture, same cleaning power: the snap is not allowed to cost
+        // anything the free fit delivered.
+        Assert.AreEqual(free.EnclaveCount, snapped.EnclaveCount)
+        Assert.IsTrue(snapped.RmsAfterMm < snapped.RmsBeforeMm / 2.0,
+                      $"snapped flatten must still clean the noise ({snapped.RmsBeforeMm} -> {snapped.RmsAfterMm})")
+
+        // And the payoff: every vert inside the noise floor of the flat's
+        // OWN fit — the whole plate, tilt notwithstanding, because
+        // membership is judged against the free plane — lands at ONE exact
+        // Y value. Parallel to XZ, not merely flat.
+        let mutable worst = 0.0
+        let mutable zMin, zMax = infinity, -infinity
+        for struct (idx, np) in snapped.Moves do
+            let v = m.Vertices[idx]
+            if abs (Vec3.dot (v - free.PlaneOrigin) free.PlaneNormal) <= 3.0 * sigma then
+                worst <- max worst (abs (np.Y - snapped.PlaneOrigin.Y))
+                zMin <- min zMin v.Z
+                zMax <- max zMax v.Z
+        printfn "worst Y spread of fully-snapped verts: %.2e mm (z span %.0f..%.0f)" worst zMin zMax
+        Assert.IsTrue(worst < 1e-9, $"full-strength verts must share one exact Y, got {worst}")
+        Assert.IsTrue(zMax - zMin > 70.0, "the exact-Y guarantee must span the whole plate")
+        // Correcting the tilt is real movement at the plate's far ends:
+        // ~0.35 mm at 0.5° over 80 mm, an order beyond any noise-sized move.
+        Assert.IsTrue(snapped.MaxMoveMm > 0.25 && free.MaxMoveMm < 0.31,
+                      $"the snap should visibly true the tilt (snapped {snapped.MaxMoveMm}, free {free.MaxMoveMm})")
+
+    /// The state's side of the snap: the candidate is detected from the
+    /// picks in WORLD space (the orientation the export will use), the
+    /// checkbox flag rides into the preview, and the currency check treats
+    /// the flag as a parameter like any other.
+    [<TestMethod>]
+    member _.Axis_snap_candidate_is_offered_and_applied_in_world_space () =
+        let stl = Path.Combine(Path.GetTempPath(), $"meshorient_snap_{Guid.NewGuid():N}.stl")
+        MeshIO.saveStlBinary stl (FlattenFixtures.wall sigma)
+        try
+            let s = MeshOrient.App.OrientState()
+            s.Load stl |> ignore
+            Assert.IsTrue(s.AxisSnapCandidate.IsNone, "no picks, no offer")
+            for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
+                let o = s.Offset
+                s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
+                           Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
+
+            // The plate is Y-normal to within pick noise: the offer is Y.
+            match s.AxisSnapCandidate with
+            | None -> Assert.Fail "a Y-normal plate must produce a snap candidate"
+            | Some(ax, off) ->
+                printfn "candidate: axis %d, %.3f° off" ax off
+                Assert.AreEqual(1, ax, "the plate is Y-normal")
+                Assert.IsTrue(off < Flatten.axisSnapThresholdDegrees)
+
+            match s.ComputeFlattenPreview(3.0 * sigma, 0.3, false, true) with
+            | Error e -> Assert.Fail e
+            | Ok pv ->
+                Assert.IsTrue(pv.SnapOffAngleDegrees.IsSome, "snap flag must reach the core")
+                Assert.IsTrue(pv.PlaneNormal.X = 0.0 && pv.PlaneNormal.Z = 0.0
+                              && abs pv.PlaneNormal.Y = 1.0,
+                              "rotation is identity here, so the snapped model-space normal is Y exactly")
+                Assert.IsTrue(s.PreviewIsCurrent(3.0 * sigma, 0.3, false, true))
+                Assert.IsFalse(s.PreviewIsCurrent(3.0 * sigma, 0.3, false, false),
+                               "unchecking the snap box must stale the preview")
+
+            // Snap off: same call, free fit, nothing reported.
+            match s.ComputeFlattenPreview(3.0 * sigma, 0.3, false, false) with
+            | Error e -> Assert.Fail e
+            | Ok pv -> Assert.IsTrue(pv.SnapOffAngleDegrees.IsNone, "unchecked = free fit")
+
+            // Rotate the model 30° about X: the picks ride along, their world
+            // plane is now 30° off Y (and 60° off Z) — no axis is near, so
+            // the offer must withdraw. World space, not model space.
+            s.ApplyRotation(Mat3.rotDegrees 0 30.0)
+            Assert.IsTrue(s.AxisSnapCandidate.IsNone,
+                          "a plane far from every axis must not be offered a snap")
+        finally
+            if File.Exists stl then File.Delete stl
+
     // ----------------------------------------------------- state integration
 
     /// The full preview loop as the window drives it, on a mesh that took the
@@ -479,14 +601,15 @@ type FlattenTests () =
             // Preview is pure: stamp ticks, currency tracks, nothing moves.
             let before = Array.copy s.Mesh.Value.Vertices
             let stamp0 = s.PreviewStamp
-            match s.ComputeFlattenPreview(floor, 0.3, false) with
+            match s.ComputeFlattenPreview(floor, 0.3, false, false) with
             | Error e -> Assert.Fail e
             | Ok pv ->
                 printfn "preview: %d verts, %d enclaves" pv.MovedVertexCount pv.EnclaveCount
                 Assert.IsTrue(pv.MovedVertexCount > 10000, "should preview the whole plate")
                 Assert.AreNotEqual(stamp0, s.PreviewStamp, "stamp must tick for the GL view")
-                Assert.IsTrue(s.PreviewIsCurrent(floor, 0.3, false))
-                Assert.IsFalse(s.PreviewIsCurrent(floor, 0.4, false), "other params = stale")
+                Assert.IsTrue(s.PreviewIsCurrent(floor, 0.3, false, false))
+                Assert.IsFalse(s.PreviewIsCurrent(floor, 0.4, false, false), "other params = stale")
+                Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false, true), "snap toggle = stale")
                 let untouched =
                     Array.forall2 (fun (a : Vec3) (b : Vec3) ->
                         a.X = b.X && a.Y = b.Y && a.Z = b.Z) before s.Mesh.Value.Vertices
@@ -496,8 +619,8 @@ type FlattenTests () =
             // be what APPLY would do.
             s.PickAt { Raycast.Origin = Vec3.create (40.0 + s.Offset.X) 1000.0 (10.0 + s.Offset.Z)
                        Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
-            Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false), "pick edits must stale the preview")
-            s.ComputeFlattenPreview(floor, 0.3, false) |> ignore
+            Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false, false), "pick edits must stale the preview")
+            s.ComputeFlattenPreview(floor, 0.3, false, false) |> ignore
 
             // Apply: mesh moves, picks are KEPT, count recorded.
             let nPicks = s.Picks.Count
@@ -539,7 +662,7 @@ type FlattenTests () =
                 let o = s.Offset
                 s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
                            Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
-            s.ComputeFlattenPreview(3.0 * sigma, 0.3, false) |> ignore
+            s.ComputeFlattenPreview(3.0 * sigma, 0.3, false, false) |> ignore
             match s.ApplyFlatten() with
             | Error e -> Assert.Fail e
             | Ok _ -> ()

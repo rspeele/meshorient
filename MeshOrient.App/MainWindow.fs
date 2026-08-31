@@ -74,6 +74,17 @@ type MainWindow() as this =
                            Margin = Thickness(0.0, 0.0, 10.0, 0.0),
                            VerticalAlignment = VerticalAlignment.Center)
     let forceOn () = cbForce.IsChecked.GetValueOrDefault false
+    // Offered only while the picks' plane sits within a couple of degrees of
+    // a true axis-normal plane — i.e. when the face is evidently MEANT to be
+    // axis-true and the residual is pick noise. Checked by default: snapped
+    // flats come out exactly parallel to each other, so cube booleans in
+    // Blender later meet them flush instead of leaving a corner proud. The
+    // content names the live axis; hidden means "no axis near, free fit".
+    let cbSnap = CheckBox(Content = "snap to true Y plane", FontSize = 12.0,
+                          IsChecked = Nullable true, IsVisible = false,
+                          Margin = Thickness(0.0, 0.0, 10.0, 0.0),
+                          VerticalAlignment = VerticalAlignment.Center)
+    let snapOn () = cbSnap.IsChecked.GetValueOrDefault true
     let mutable btFlatten : Button = null
     let mutable btApply : Button = null
     let mutable btDiscard : Button = null
@@ -84,9 +95,14 @@ type MainWindow() as this =
         | _ -> None
 
     let refreshFlattenBar () =
+        (match state.AxisSnapCandidate with
+         | Some(ax, _) ->
+             cbSnap.Content <- $"""snap to true {"XYZ"[ax]} plane"""
+             cbSnap.IsVisible <- true
+         | None -> cbSnap.IsVisible <- false)
         let current =
             match parsedParams () with
-            | Some(f, c) -> state.PreviewIsCurrent(f, c, forceOn ())
+            | Some(f, c) -> state.PreviewIsCurrent(f, c, forceOn (), snapOn ())
             | None -> false
         if not (isNull btFlatten) then
             btFlatten.IsEnabled <- state.CanFlatten && not current
@@ -188,7 +204,12 @@ type MainWindow() as this =
             elif pv.EnclaveCount > 0 then
                 $" · %d{pv.EnclaveCount} enclave(s) in YELLOW — inspect them"
             else ""
-        $"Preview: would flatten %d{pv.MovedVertexCount} verts across %d{pv.Islands} island(s) · RMS %.3f{pv.RmsBeforeMm} → %.3f{pv.RmsAfterMm} mm · max move %.3f{pv.MaxMoveMm} mm{enc}. Tweak floor/ceiling and APPLY when it looks right."
+        let snap =
+            match pv.SnapOffAngleDegrees, state.AxisSnapCandidate with
+            | Some off, Some(ax, _) ->
+                $""" · snapped to the true {"XYZ"[ax]} plane (free fit was %.2f{off}° off)"""
+            | _ -> ""
+        $"Preview: would flatten %d{pv.MovedVertexCount} verts across %d{pv.Islands} island(s) · RMS %.3f{pv.RmsBeforeMm} → %.3f{pv.RmsAfterMm} mm · max move %.3f{pv.MaxMoveMm} mm{enc}{snap}. Tweak floor/ceiling and APPLY when it looks right."
 
     /// Compute or refresh the preview from the boxes. The floor box pre-fills
     /// from the picks' own plane-fit RMS the first time — the scan's measured
@@ -201,7 +222,7 @@ type MainWindow() as this =
         match parsedParams () with
         | None -> setStatus "Floor and ceiling must be numbers (mm), ceiling > 0."
         | Some(f, c) ->
-            match state.ComputeFlattenPreview(f, c, forceOn ()) with
+            match state.ComputeFlattenPreview(f, c, forceOn (), snapOn ()) with
             | Error msg -> setStatus msg
             | Ok pv ->
                 refresh ()
@@ -356,9 +377,15 @@ type MainWindow() as this =
         ToolTip.SetTip(cbForce,
             "Snap the YELLOW pockets flat too, however far out their verts sit — for scanner "
             + "blobs and dents living inside the flat. Leave off when an enclave is a real feature.")
+        ToolTip.SetTip(cbSnap,
+            "Your picks' plane is within a fraction of a degree of a true axis-normal plane, "
+            + "so it is presumably meant to BE one. Checked: flatten onto that exact plane, so "
+            + "every such flat comes out parallel and later cube booleans sit flush. "
+            + "Unchecked: flatten onto the fitted plane exactly as detected.")
         // A checkbox click is a discrete gesture, same class as an arrow press:
         // a live preview follows it.
         cbForce.IsCheckedChanged.Add(fun _ -> syncPreview ())
+        cbSnap.IsCheckedChanged.Add(fun _ -> syncPreview ())
         ToolTip.SetTip(tbFloor,
             "Noise floor, mm: distances up to this snap fully. Pre-fills from your picks' "
             + "plane-fit RMS ×3. ↑/↓ steps ±0.1 above 0.1, halves/doubles below.")
@@ -372,6 +399,7 @@ type MainWindow() as this =
         flattenBar.Children.Add tbFloor
         flattenBar.Children.Add(label "ceiling mm")
         flattenBar.Children.Add tbCeiling
+        flattenBar.Children.Add cbSnap
         flattenBar.Children.Add cbForce
         flattenBar.Children.Add btApply
         flattenBar.Children.Add btDiscard

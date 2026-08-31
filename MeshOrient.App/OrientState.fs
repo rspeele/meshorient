@@ -54,7 +54,7 @@ type OrientState() =
     // do, which is what the version counters track.
     let mutable adjacency : Flatten.Adjacency option = None
     let mutable preview : Flatten.Preview option = None
-    let mutable previewParams = (nan, nan, false)
+    let mutable previewParams = (nan, nan, false, false)
     let mutable previewPicksVersion = -1
     let mutable picksVersion = 0
     let mutable previewStamp = 0
@@ -364,13 +364,35 @@ type OrientState() =
     /// True when the shown preview matches these parameters AND the picks it
     /// was computed from — i.e. pressing Update would change nothing. The
     /// window greys the button on this.
-    member _.PreviewIsCurrent(floorMm : float, ceilingMm : float, forceEnclaves : bool) =
+    member _.PreviewIsCurrent(floorMm : float, ceilingMm : float, forceEnclaves : bool,
+                              snapToAxis : bool) =
         match preview with
         | None -> false
         | Some _ ->
-            let (pf, pc, pforce) = previewParams
-            previewPicksVersion = picksVersion && pforce = forceEnclaves
+            let (pf, pc, pforce, psnap) = previewParams
+            previewPicksVersion = picksVersion && pforce = forceEnclaves && psnap = snapToAxis
             && abs (pf - floorMm) < 1e-12 && abs (pc - ceilingMm) < 1e-12
+
+    /// The WORLD axis (0 = X, 1 = Y, 2 = Z) the picks' plane is nearly
+    /// normal to, with how far off it the pick fit sits, in degrees — the
+    /// "snap to true axis plane" offer. Within the threshold the face is
+    /// evidently MEANT to be axis-true and the residual is pick noise, not
+    /// design: snapping makes every such flat exactly parallel to the
+    /// others, so cube booleans downstream sit flush instead of leaving one
+    /// corner proud and another below (user-reported from Blender CSG).
+    /// World space, not model space: "true Y" is a promise about the
+    /// exported frame, which is the current orientation — the scan's own
+    /// frame is arbitrary.
+    member this.AxisSnapCandidate : (int * float) option =
+        if picks.Count < 3 then None
+        else
+            let n = (Geometry.fitPlane this.PicksWorld).Normal
+            let c = [| abs n.X; abs n.Y; abs n.Z |]
+            let ax = if c[0] >= c[1] && c[0] >= c[2] then 0
+                     elif c[1] >= c[2] then 1
+                     else 2
+            let off = acos (Math.Clamp(c[ax], 0.0, 1.0)) * 180.0 / Math.PI
+            if off <= Flatten.axisSnapThresholdDegrees then Some(ax, off) else None
 
     /// Suggested noise floor: 3x the plane-fit RMS of the picks — the scan's
     /// own noise, measured off the very points the user just placed.
@@ -382,7 +404,8 @@ type OrientState() =
 
     /// Compute (or refresh) the preview. Pure with respect to the mesh —
     /// nothing moves until ApplyFlatten.
-    member this.ComputeFlattenPreview(floorMm : float, ceilingMm : float, forceEnclaves : bool)
+    member this.ComputeFlattenPreview(floorMm : float, ceilingMm : float, forceEnclaves : bool,
+                                      snapToAxis : bool)
             : Result<Flatten.Preview, string> =
         match mesh with
         | None -> Error "Load a scan first."
@@ -402,14 +425,24 @@ type OrientState() =
                 let seeds = picks |> Seq.map (fun p -> p.Triangle) |> Seq.distinct |> Seq.toArray
                 let pts = picks |> Seq.map (fun p -> p.Point) |> Seq.toArray
                 let hint = picks |> Seq.fold (fun acc p -> acc + p.Normal) Vec3.zero
+                // "True Y" is a world-space promise; the flatten runs in
+                // model space, so the axis rides the inverse rotation in.
+                // No candidate near = nothing to snap to, flag or no flag.
+                let snapNormal =
+                    if not snapToAxis then None
+                    else
+                        this.AxisSnapCandidate
+                        |> Option.map (fun (ax, _) ->
+                            Mat3.apply (Mat3.transpose rotation) (Vec3.axis ax))
                 let pv =
                     Flatten.preview m adj seeds pts hint
                         { Flatten.defaults with
                             FloorMm = floorMm
                             CeilingMm = ceilingMm
-                            ForceEnclaves = forceEnclaves }
+                            ForceEnclaves = forceEnclaves
+                            SnapNormal = snapNormal }
                 preview <- Some pv
-                previewParams <- (floorMm, ceilingMm, forceEnclaves)
+                previewParams <- (floorMm, ceilingMm, forceEnclaves, snapToAxis)
                 previewPicksVersion <- picksVersion
                 previewStamp <- previewStamp + 1
                 Ok pv
