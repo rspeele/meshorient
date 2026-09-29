@@ -148,8 +148,8 @@ let fitLine2 (points : (float * float)[]) : LineFit2 =
     { DirX = dx; DirY = dy; CentroidX = mx; CentroidY = my; Rms = sqrt (acc / n) }
 
 /// PCA orientation guess: longest principal axis -> X, thinnest -> Y,
-/// middle -> Z. 90-degree
-/// ambiguities are expected and the UI's rotate/flip buttons resolve them.
+/// middle -> Z. 90-degree ambiguities are expected and the UI's rotate/flip
+/// buttons resolve them.
 ///
 /// The covariance comes from AREA-WEIGHTED TRIANGLE CENTROIDS, not from the
 /// raw vertex array. Vertex PCA measures the tessellation, not the

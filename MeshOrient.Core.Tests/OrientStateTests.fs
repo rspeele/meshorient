@@ -29,9 +29,7 @@ type OrientStateTests () =
 
     /// Loading must NOT move the model. A scan that is only flattened and
     /// re-exported has to come back in the coordinate frame it arrived in —
-    /// the user's other Blender objects are registered against it. (This
-    /// asserts the opposite of what it used to: an eager load-time centring
-    /// shifted every flatten-only export by minus the bbox centre.) Centring
+    /// the user's other Blender objects are registered against it. Centring
     /// starts with the FIRST orientation command, which recentres anyway.
     [<TestMethod>]
     member _.Loading_keeps_the_scan_in_its_source_coordinates () =
@@ -42,8 +40,8 @@ type OrientStateTests () =
         printfn "load frame: centre %A (source centre %A)" (Bounds.centre b) (Bounds.centre raw)
         Assert.AreEqual(raw.Min.Y, b.Min.Y, 1e-12, "bounds are the file's own")
         Assert.AreEqual(raw.Max.Z, b.Max.Z, 1e-12, "bounds are the file's own")
-        // The synthetic's bbox centre is NOT the origin — proving the old
-        // behaviour is really gone, not accidentally reproduced.
+        // The synthetic's bbox centre is NOT the origin, so a load-time
+        // centring would be caught here rather than passing by accident.
         Assert.IsTrue(Vec3.length (Bounds.centre raw) > 1.0,
                       "fixture must have an off-origin centre for this test to bite")
 
@@ -74,7 +72,7 @@ type OrientStateTests () =
 
     /// Picks are stored in MODEL space, so a later re-orientation carries them
     /// along instead of stranding them in mid-air. This is the property that
-    /// makes "press Square twice and it reads 0.000" work.
+    /// makes "press Orient Face to Side twice and it reads 0.000" work.
     [<TestMethod>]
     member _.Picks_follow_the_model_through_a_re_orientation () =
         let s = loaded ()
@@ -87,7 +85,7 @@ type OrientStateTests () =
             printfn "pick before %A, after a 90 deg Z rotation %A" before after
             // The pick must land exactly where the state's own transform put
             // that piece of surface: rotate the old world point (load applies
-            // no offset now) and add the post-rotation centring offset.
+            // no offset) and add the post-rotation centring offset.
             let expect = Mat3.apply r before + s.Offset
             Assert.AreEqual(expect.X, after.X, 1e-9, "pick X after rotation")
             Assert.AreEqual(expect.Y, after.Y, 1e-9, "pick Y after rotation")
@@ -193,12 +191,9 @@ type OrientStateTests () =
     /// Both operations read the SAME pick list, and there is no mode to have
     /// set wrong.
     ///
-    /// This replaces a test that asserted the opposite. Two lists, routed by a
-    /// stage dropdown, meant a point you had just clicked was invisible to
-    /// whichever button was reading the other one: STRAIGHTEN reported "no
-    /// points selected" with markers plainly on screen (user-reported). The
-    /// separation had no purpose — the two stages are sequential, and you
-    /// never need both sets of picks at once.
+    /// Separate lists would let a button report "no points selected" with
+    /// markers plainly on screen, and buy nothing: the two stages are
+    /// sequential, and you never need both sets of picks at once.
     [<TestMethod>]
     member _.Both_operations_read_the_same_picks () =
         let s = loaded ()
@@ -244,10 +239,9 @@ type OrientStateTests () =
     /// The readout runs on EVERY pick, including the first, so it has to
     /// survive counts too small for either fit.
     ///
-    /// It did not. `let` is eager in F#, so binding both fits before choosing
-    /// between them called `straightenAbout` with a single point, which throws
-    /// — and an exception on the pick path killed the window outright. One
-    /// click on a freshly loaded scan was enough.
+    /// `straightenAbout` throws on a single point, and an exception on the
+    /// pick path takes the window down, so the one-pick case is the one that
+    /// matters.
     [<TestMethod>]
     member _.Readout_survives_every_pick_count_from_zero_up () =
         let s = loaded ()
@@ -255,7 +249,7 @@ type OrientStateTests () =
             [| yield! Fixtures.flatRightWallProbes
                yield (0.0, 20.0); yield (-15.0, -30.0) |]
         for i in 0 .. probes.Length - 1 do
-            // Must not throw at ANY count — 1 is the case that took it down.
+            // Must not throw at ANY count.
             let text = s.CurrentFit()
             printfn "%d picks -> %s" i text
             Assert.IsNotNull text

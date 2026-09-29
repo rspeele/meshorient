@@ -8,9 +8,9 @@
 /// worked ladder is  0.21 -> 0.11 -> 0.055 -> 0.0275  and exactly back up.
 ///
 /// Up and down are exact inverses at EVERY value, not just on that ladder
-/// (0.16 -> 0.08 -> 0.16 works too). The tests pin the invariant, and pin it
-/// through the format+parse round trip, because the textbox is the source of
-/// truth: each press parses the text, steps, and reformats.
+/// (0.16 -> 0.08 -> 0.16 works too). The tests pin the invariant, and run the
+/// worked ladder through the format+parse round trip, because the textbox is
+/// the source of truth: each press parses the text, steps, and reformats.
 module MeshOrient.App.ParamStep
 
 open System

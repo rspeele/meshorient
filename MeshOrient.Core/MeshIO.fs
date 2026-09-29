@@ -1,8 +1,8 @@
 /// Mesh file I/O: STL (binary + ASCII), OBJ and PLY in; binary STL out.
 ///
-/// Self-contained on purpose. A scan loader
-/// and an STL writer are a few hundred lines; a mesh library is a dependency
-/// that has to be kept current forever. Nothing here needs a mesh kernel.
+/// Self-contained on purpose. A scan loader and an STL writer are a few
+/// hundred lines; a mesh library is a dependency that has to be kept current
+/// forever. Nothing here needs a mesh kernel.
 module MeshOrient.Core.MeshIO
 
 open System
@@ -114,8 +114,9 @@ let private plyType (s : string) =
     | true, t -> t
     | _ -> failwithf "Unsupported PLY property type '%s'" s
 
-/// Read one scalar from `bytes` at `off`, returning it as a float (positions)
-/// and an int (indices) both — PLY stores either as any of these types.
+/// Read one scalar from `bytes` at `off` as a float, whatever its stored type.
+/// Positions use it directly; list counts and indices truncate it to int,
+/// which is exact for every PLY integer type.
 let private readPlyScalar (bytes : byte[]) (off : int) (ty : PlyScalar) (bigEndian : bool) : float =
     let span = ReadOnlySpan(bytes, off, ty.Size)
     if bigEndian then
@@ -286,8 +287,8 @@ let private suffixedPathFor (suffix : string) (sourcePath : string) =
     let file = Path.GetFileNameWithoutExtension sourcePath + suffix + ".stl"
     if String.IsNullOrEmpty dir then file else Path.Combine(dir, file)
 
-/// `<name>_oriented.stl` beside the source file. Always
-/// the PURE rigid transform of the scan, no flattens.
+/// `<name>_oriented.stl` beside the source file. Always the PURE rigid
+/// transform of the scan, no flattens.
 let orientedPathFor = suffixedPathFor "_oriented"
 
 /// `<name>_cleaned.stl` — the oriented scan WITH flatten mutations baked in.

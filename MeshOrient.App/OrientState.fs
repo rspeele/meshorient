@@ -1,17 +1,12 @@
 /// The tool's whole model: a mesh, the rigid transform being built for it, and
 /// the points picked for whatever alignment comes next.
 ///
-/// There is NO mode. One pick list, and both alignment operations read it:
-/// SQUARE wants 3+ points on a flat side face, STRAIGHTEN wants 2+ on a flat
-/// top or bottom. Nothing has to be told which you meant, so nothing can be
-/// set wrong.
-///
-/// It was modal at first — a stage dropdown routing clicks into one of two
-/// hidden pick lists. That made SQUARE work from the default mode while
-/// STRAIGHTEN refused with "no points selected" with points plainly on screen
-/// (user-reported): the button was reading the other list. A selector whose
-/// only job is deciding which invisible bucket your clicks land in is not a
-/// feature, it is a way to be wrong.
+/// There is NO mode. One pick list, and every operation reads it: squaring
+/// (Orient Face to Side) wants 3+ points on a flat side face, straightening
+/// (Y-Spin Face to Level) wants 2+ on a flat top or bottom, and so on.
+/// Nothing has to be told which you meant, so nothing can be set wrong — a
+/// selector routing clicks into separate hidden lists would let a button read
+/// a different list from the points on screen.
 ///
 /// No Avalonia and no GL here, so every operation the buttons invoke can be
 /// exercised without a window.
@@ -35,9 +30,9 @@ type private UndoEntry =
     /// `flattenedVerts`, which is what undoing it must take back off.
     | Reshape of restore : (int * Vec3)[] * movedVertexCount : int
 
-/// The axis SQUARE targets and STRAIGHTEN rotates about. Hard-coded to Y
-/// (across the frame) — the core functions both take an axis index, so
-/// exposing it is a UI change and nothing more.
+/// The axis squaring targets and straightening rotates about. Hard-coded to
+/// Y — the core functions both take an axis index, so exposing it is a UI
+/// change and nothing more.
 [<AutoOpen>]
 module private Constants =
     let lockedAxis = 1
@@ -75,9 +70,9 @@ type OrientState() =
     let mutable pristineVerts : Vec3[] = [||]
 
     // Picks live in MODEL space, not world space. That means a re-orientation
-    // carries them along for free: press SQUARE twice and the second reading
-    // is 0.000 degrees, because the picks moved with the mesh they were taken
-    // on — it falls out of the representation.
+    // carries them along for free: press Orient Face to Side twice and the
+    // second reading is 0.000 degrees, because the picks moved with the mesh
+    // they were taken on — it falls out of the representation.
     let picks = ResizeArray<Pick>()
 
     let picksChanged () = picksVersion <- picksVersion + 1
@@ -107,12 +102,10 @@ type OrientState() =
     /// ROTATION — and only then. Loading does NOT centre: a scan that is only
     /// flattened and re-exported must come back in the coordinate frame it
     /// arrived in, because the user's other Blender objects are registered
-    /// against that frame (an eager load-time centre shifted every
-    /// flatten-only export by minus the bbox centre, user-reported). The
-    /// views never needed it — panels and orbit both frame on Bounds.centre
-    /// wherever the model sits. The first orientation command is the moment
-    /// the source frame stops being meaningful, so that is when centring
-    /// starts.
+    /// against that frame. The views never need it — panels and orbit both
+    /// frame on Bounds.centre wherever the model sits. The first orientation
+    /// command is the moment the source frame stops being meaningful, so
+    /// that is when centring starts.
     let recentre () =
         match mesh with
         | Some m ->
@@ -344,10 +337,9 @@ type OrientState() =
     member this.CurrentFit() : string =
         let world = this.PicksWorld
         // Each fit is computed ONLY inside the branch that has enough points
-        // for it. `let` is eager in F#, so binding both up front and choosing
-        // between them afterwards calls `straightenAbout` with one pick, which
-        // throws — and an exception on the pick path took the whole window
-        // down. Guard before the call, not after it.
+        // for it: `straightenAbout` throws on one pick, and this runs on every
+        // pick, including the first. `let` is eager in F#, so binding both
+        // fits up front and choosing afterwards would already be too late.
         if world.Length = 0 then ""
         elif world.Length = 1 then "1 pick · to-side needs 3 · y-spin needs 2"
         else
@@ -400,8 +392,8 @@ type OrientState() =
     /// "snap to true axis plane" offer. Within the threshold the face is
     /// evidently MEANT to be axis-true and the residual is pick noise, not
     /// design: snapping makes every such flat exactly parallel to the
-    /// others, so cube booleans downstream sit flush instead of leaving one
-    /// corner proud and another below (user-reported from Blender CSG).
+    /// others, so cube booleans downstream (Blender CSG) sit flush instead
+    /// of leaving one corner proud and another below.
     /// World space, not model space: "true Y" is a promise about the
     /// exported frame, which is the current orientation — the scan's own
     /// frame is arbitrary.

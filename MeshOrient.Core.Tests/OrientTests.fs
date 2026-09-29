@@ -99,11 +99,11 @@ type SquareTests () =
             Fixtures.flatRightWallProbes
             |> Array.map (fun (x, z) -> Fixtures.rightFaceAt tilted x z)
         let r = (Orient.squareToAxis 1 picks).Rotation
-        // A pure tilt about X, corrected, must leave the bore direction alone.
-        let bore = Mat3.apply r (Mat3.apply tilt Vec3.unitX)
-        printfn "bore after squaring a 3 deg X-tilt: %A" bore
-        Assert.IsTrue(Fixtures.degreesBetween bore Vec3.unitX < 0.2,
-                      $"squaring should not have rotated the bore, got {bore}")
+        // A pure tilt about X, corrected, must leave the long (X) axis alone.
+        let longAxis = Mat3.apply r (Mat3.apply tilt Vec3.unitX)
+        printfn "long axis after squaring a 3 deg X-tilt: %A" longAxis
+        Assert.IsTrue(Fixtures.degreesBetween longAxis Vec3.unitX < 0.2,
+                      $"squaring should not have rotated the long axis, got {longAxis}")
 
     [<TestMethod>]
     member _.Tilt_components_split_into_the_two_visible_leans () =
@@ -170,9 +170,9 @@ type CenterlineTests () =
 [<TestClass>]
 type StraightenTests () =
 
-    /// The second alignment: get the bore pointing straight down X off picks
-    /// on a flat top reference (here the top rail, standing in for a slide
-    /// top), WITHOUT disturbing the side-face squaring already done.
+    /// The second alignment: get the long axis pointing straight down X off
+    /// picks on a flat top reference (here the top rail), WITHOUT disturbing
+    /// the side-face squaring already done.
     [<TestMethod>]
     member _.Recovers_a_known_roll_from_top_face_picks () =
         let rolled = Mesh.transform (Mat3.rotDegrees 1 7.0) Vec3.zero Fixtures.synthetic.Value
@@ -186,7 +186,7 @@ type StraightenTests () =
     /// The constraint that justifies rotating about Y rather than X. Rotating
     /// about X by any amount tips the side face straight back out of square,
     /// undoing stage 2; rotation about the locked axis is the only remaining
-    /// freedom, and it is exactly the one that swings the bore in the side
+    /// freedom, and it is exactly the one that swings the long axis in the side
     /// view. If someone "fixes" this to rotX, this test is what stops them.
     [<TestMethod>]
     member _.Straightening_leaves_the_locked_axis_exactly_alone () =

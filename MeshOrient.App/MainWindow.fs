@@ -320,10 +320,8 @@ type MainWindow() as this =
         this.Height <- 820.0
         this.Background <- SolidColorBrush(Color.FromRgb(0x1Euy, 0x1Fuy, 0x22uy))
 
-        // No stage selector. Its only real job was routing clicks into one of
-        // two pick lists, which is exactly how STRAIGHTEN came to report "no
-        // points selected" with points on screen. One list, both buttons, and
-        // each button greys itself out until it has what it needs.
+        // No stage selector: one pick list feeds every button, and each
+        // button greys itself out until it has what it needs.
         let toolbar = StackPanel(Orientation = Orientation.Horizontal, Margin = Thickness(10.0, 8.0))
         toolbar.Children.Add(button "Open…" "Load an STL, OBJ or PLY (or drag one onto the window)"
                                     (fun () -> openDialog () |> ignore))
@@ -440,8 +438,7 @@ type MainWindow() as this =
 
         // An exception out of a pointer handler is unhandled and takes the
         // window down with it, losing an orientation that may have taken
-        // several minutes of picking to build. One did exactly that: the
-        // readout threw on the very first pick. Report it and carry on — the
+        // several minutes of picking to build. Report it and carry on — the
         // state is still good, and a message in the status bar is a bug
         // report rather than a vanished window.
         let guarded (what : string) (body : unit -> unit) =
@@ -487,9 +484,9 @@ type MainWindow() as this =
                 match e.Key with
                 | Key.Escape -> e.Handled <- true; doDiscardPreview ()
                 // Presets. Blender muscle memory mapped onto this world
-                // (+X muzzle, +Z up, -Y the gun's right):
-                //   1 = camera on -Y  -> the gun's RIGHT (same as the R panel)
-                //   3 = camera on +X  -> muzzle-on
+                // (+X front, +Z up, -Y the part's right; see Camera.orthoBasis):
+                //   1 = camera on -Y  -> the part's RIGHT (same as the R panel)
+                //   3 = camera on +X  -> front-on
                 //   7 = top, +Y up on screen, exactly at the pole (the orbit
                 //       camera's tangent up-vector makes that legal)
                 | Key.NumPad1 -> e.Handled <- true; view.SetOrbitAngles(-MathF.PI / 2.0f, 0.0f)

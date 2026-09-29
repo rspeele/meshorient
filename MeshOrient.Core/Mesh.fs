@@ -106,13 +106,12 @@ module Mesh =
         Vec3.cross (b - a) (c - a)
 
     /// Median edge length — a robust read on how finely the scan is
-    /// tessellated. Used to size the pick marker so it reads the same on a
-    /// coarse mesh and a dense one.
+    /// tessellated.
     let medianEdgeLength (m : Mesh) =
         if m.TriangleCount = 0 then 0.0
         else
-            // One edge per triangle is a fair enough sample and keeps this
-            // O(triangles) rather than O(3 x triangles) with a big sort.
+            // One edge per triangle is a fair enough sample, and a third of
+            // the sort that measuring all three would cost.
             let lengths =
                 Array.init m.TriangleCount (fun t ->
                     let struct (a, b, _) = triangle m t

@@ -2,7 +2,7 @@
 /// onto the true plane.
 ///
 /// The naive version — snap every vertex within k of the plane — fails two
-/// ways (user-illustrated, both from real scans):
+/// ways, both seen on real scans:
 ///
 ///   1. The infinite plane slices through unrelated geometry elsewhere on the
 ///      model, and snapping puts ripples in a surface that was never flat.
@@ -124,15 +124,17 @@ let axisSnapThresholdDegrees = 2.0
 
 type Params =
     {   /// Full-snap zone: |distance| <= this is treated as pure noise and
-        /// snapped all the way. Default to ~3x the plane-fit RMS of the picks
-        /// — the scan's own noise floor, measured, not guessed.
+        /// snapped all the way. The app suggests ~3x the plane-fit RMS of the
+        /// picks — the scan's own noise floor, measured, not guessed.
         FloorMm : float
         /// Capture ceiling (the k). Beyond this nothing moves, and the snap
         /// strength has already feathered to zero on the way there.
         CeilingMm : float
         /// A face joins the flood only if its normal is within this many
         /// degrees of the plane normal. Real scan flats jitter by ~8 degrees;
-        /// 30 accepts them with margin and still rejects any genuine chamfer.
+        /// 30 accepts them with margin and still stops at walls and steep
+        /// chamfers. A shallower bevel passes the gate — there the distance
+        /// ceiling is what stops the flood.
         NormalGateDegrees : float
         /// When set, every vertex of every ENCLAVE face — the yellow pockets,
         /// fully surrounded by the captured flat — is snapped to the plane at
@@ -143,18 +145,18 @@ type Params =
         ForceEnclaves : bool
         /// When set, verts are sent onto the plane with EXACTLY this normal
         /// (model space, unit-ish; sign is reconciled with the picks) through
-        /// the fitted origin, instead of onto the free fit. The snap changes
-        /// the DESTINATION only, never the membership: the flood, the feather
-        /// weights and the refit all keep asking "is this vert part of the
-        /// flat?" against the flat's own free fit — a uniformly tilted flat
-        /// is still perfectly flat to itself, and measuring membership
-        /// against the snapped plane instead was tried and fragments the
-        /// capture of any face whose tilt-induced deviation crosses the
-        /// ceiling. For flats that are SUPPOSED to be true-normal to an
-        /// axis: the free fit gets within a fraction of a degree, and that
-        /// fraction is exactly what makes flattened faces non-parallel to
-        /// each other. None = flatten onto the free fit, the previous
-        /// behavior.
+        /// the fitted origin, instead of onto the free fit. For flats that
+        /// are SUPPOSED to be true-normal to an axis: the free fit gets
+        /// within a fraction of a degree, and that fraction is exactly what
+        /// makes separately flattened faces non-parallel to each other.
+        ///
+        /// The snap changes the DESTINATION only, never the membership: the
+        /// flood, the feather weights and the refit all judge "is this vert
+        /// part of the flat?" against the flat's own free fit. A uniformly
+        /// tilted flat is still perfectly flat to itself, whereas measuring
+        /// membership against the snapped plane fragments the capture of any
+        /// face whose tilt carries it past the ceiling. None = flatten onto
+        /// the free fit.
         SnapNormal : Vec3 option }
 
 let defaults =
@@ -253,8 +255,8 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         // walls are wound inward, and real scans mix orientations freely —
         // so the gate is orientation-agnostic, same as the renderer's
         // headlight shading. The cost: the backside of a plate THINNER than
-        // the ceiling would be captured along with its front. No part this
-        // tool exists for has sub-0.3 mm walls.
+        // the ceiling would be captured along with its front — accepted,
+        // since walls that thin are rare on scanned parts.
         if abs (Vec3.dot n planeN) < cosGate then false
         else
             let mutable near = infinity
@@ -343,9 +345,9 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     //   - OPEN mesh (a plate, a clipped scan): a complement component that
     //     owns boundary edges reaches the edge of the world — it is outside
     //     by construction. Interior components are enclaves, all of them.
-    //     (The old always-largest rule failed here: flood a plate to its rim
-    //     and a lone dome cap was the ONLY complement component, so
-    //     "largest" declared the enclave to be the outside.)
+    //     (The closed-mesh "largest is outside" rule would fail here: flood a
+    //     plate to its rim and a lone dome cap is the ONLY complement
+    //     component, so "largest" would call the enclave the outside.)
     //   - CLOSED mesh (a watertight scan): no boundary exists, so the
     //     largest touching component is the rest of the model and the others
     //     are enclaves. Blind spot, accepted: flood nearly all of a closed
@@ -417,12 +419,12 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     // exactly backwards: feathered verts keep a residual that GROWS toward
     // the ceiling while the enclave interior lands at zero, printing a raised
     // ring around the erased pocket — the verts that were NEARER the plane
-    // would have ended up FARTHER from it (user-reported). So any captured
-    // face in the partial-weight zone connected to a forced enclave is pulled
-    // to full strength too; the halo BFS stops at the full-snap plateau,
-    // which is what keeps feathering intact everywhere it still belongs.
+    // would end up FARTHER from it. So any captured face in the
+    // partial-weight zone connected to a forced enclave is pulled to full
+    // strength too; the halo BFS stops at the full-snap plateau, which is
+    // what keeps feathering intact everywhere it still belongs.
     //
-    // Caveat, documented not hidden: if a forced enclave's halo band merges
+    // Caveat: if a forced enclave's halo band merges
     // with the feather band at the region's OUTER edge (a feature bleeding
     // into the flood boundary), the force follows it there and the boundary
     // gets a hard edge. The yellow preview shows exactly how far the force

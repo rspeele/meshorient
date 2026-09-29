@@ -2,20 +2,22 @@
 ///
 /// Three stages, applied in order, each narrowing the remaining freedom:
 ///
-///   1. Coarse   — `Geometry.autoOrient` (PCA) plus the UI's 90-degree
-///                 rotate / flip / re-centre buttons.
-///   2. Square   — pick 3+ points on a face that really is flat; the smallest
-///                 rotation that squares that face to an axis (Y by default).
-///   3. Straighten — pick 2+ points on a top or bottom reference; a rotation
-///                 ABOUT the axis stage 2 just locked, which is the only
-///                 rotation that leaves stage 2 intact.
+///   1. Coarse     — `Geometry.autoOrient` (PCA) plus the UI's 90-degree
+///                   rotate / flip buttons.
+///   2. Square     — the "Orient Face to Side" button. Pick 3+ points on a
+///                   face that really is flat; the smallest rotation that
+///                   squares that face to an axis (Y in the app).
+///   3. Straighten — the "Y-Spin Face to Level" button. Pick 2+ points on a
+///                   top or bottom face; a rotation ABOUT the axis stage 2
+///                   just locked, which is the only rotation that leaves
+///                   stage 2 intact.
 ///
 /// Stage 3's constraint is the whole reason it works. Once a side face is
 /// square to Y, rotating about X or Z tilts it straight back out of square —
-/// rotating about Y is the sole remaining degree of freedom, and it happens to
-/// be exactly the one that swings the bore up and down in the side view. So
-/// "get the muzzle pointing down X without disturbing the levelling" and
-/// "rotate about Y" are the same instruction.
+/// rotating about Y is the sole remaining degree of freedom, and it is
+/// exactly the one that swings the model's long axis up and down in the side
+/// view. So "level the top without disturbing the side" and "rotate about Y"
+/// are the same instruction.
 module MeshOrient.Core.Orient
 
 open System
@@ -41,7 +43,7 @@ type SquareResult =
         RmsMm : float }
 
 /// Smallest rotation squaring the plane through `picks` to world `axis`
-/// (0 = X, 1 = Y, 2 = Z; Y is the frame's flat side).
+/// (0 = X, 1 = Y, 2 = Z).
 ///
 /// Rodrigues about `normal x target`, so it removes tilt without spinning the
 /// model about the target axis — whatever stage 1 established stays put, and
@@ -61,10 +63,9 @@ let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
           TiltDegrees = toDegrees angle
           RmsMm = fit.Rms }
 
-/// The two visible components of a tilt, in degrees, for the ortho-view
-/// titles: rotation about X leans the model in the back (Y-Z) view, rotation
-/// about Z leans it in the top (X-Y) view. Only meaningful for a Y-axis
-/// square.
+/// The two visible components of a tilt, in degrees: rotation about X leans
+/// the model in the back (Y-Z) view, rotation about Z leans it in the top
+/// (X-Y) view. Only meaningful for a Y-axis square.
 let tiltComponents (picks : Vec3[]) : float * float =
     let fit = Geometry.fitPlane picks
     let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal
@@ -128,7 +129,7 @@ let yCenterline (tolMm : float) (pickYs : float[]) : Result<CenterlineResult, Ce
 
 /// Rotate ABOUT `lockedAxis` so the face through `picks` comes level.
 ///
-/// `lockedAxis` is whatever stage 2 squared to (Y for a pistol frame). The
+/// `lockedAxis` is whatever stage 2 squared to (Y in the app). The
 /// picks are projected onto the plane perpendicular to it — for Y that is the
 /// X-Z side view — and a total-least-squares line is fitted through them. Two
 /// picks give an exact line; more average out the error in each pick, which is
@@ -136,8 +137,8 @@ let yCenterline (tolMm : float) (pickYs : float[]) : Result<CenterlineResult, Ce
 ///
 /// Dropping the locked-axis coordinate is not a loss: once that axis is
 /// square, spread along it carries no information about this rotation. Points
-/// across the width of a slide top collapse onto the same place on the line
-/// and contribute nothing, which is correct.
+/// spread across the width of a top face collapse onto the same place on the
+/// line and contribute nothing, which is correct.
 let straightenAbout (lockedAxis : int) (picks : Vec3[]) : StraightenResult =
     if picks.Length < 2 then
         invalidArg "picks" $"need at least 2 points to straighten, got {picks.Length}"

@@ -78,7 +78,7 @@ module private FlattenFixtures =
             + Vec3.create (noise rng sigma) (noise rng sigma) (noise rng sigma)
         gridMesh cols.Length nj pos (fun _ _ -> true), cols.Length
 
-    /// The main fixture: a gun-wall stand-in in the XZ plane (normal +-Y),
+    /// The main fixture: a side-wall stand-in in the XZ plane (normal +-Y),
     /// jittered, carrying every situation the flood has to get right:
     ///   - a rectangular WINDOW (missing faces) — must NOT read as an enclave
     ///   - a round BOSS raised 1.5 mm — must become an enclave
@@ -124,7 +124,7 @@ module private FlattenFixtures =
     /// gate passes ALL of it; the distance ceiling is what stops the flood,
     /// making the cap an enclave with a captured, feathered annulus running
     /// up to it — the exact "smooth gradient toward the enclave" geometry
-    /// where force-flattening used to print a ring.
+    /// where force-flattening without a halo prints a ring.
     let dome (sigma : float) : Mesh =
         let rng = Random 41
         let step = 0.5
@@ -175,7 +175,7 @@ module private FlattenFixtures =
 [<TestClass>]
 type FlattenTests () =
 
-    let sigma = 0.02                                   // the g21's measured noise
+    let sigma = 0.02                                   // measured on a real scan
 
     let previewOn (m : Mesh) (seeds : int[]) (pts : Vec3[]) (hint : Vec3) floor ceiling =
         let adj = Flatten.buildAdjacency m
@@ -215,7 +215,7 @@ type FlattenTests () =
 
     /// The STL round trip a real scan takes: indexed surface -> binary STL
     /// (triangle soup, but with bit-identical shared coordinates, which is
-    /// what MeshMixer emits — verified on the g21) -> load -> exact-bit weld
+    /// what MeshMixer emits — verified on a real scan) -> load -> exact-bit weld
     /// reconstructs the surface. This is the property the whole flood stands
     /// on.
     [<TestMethod>]
@@ -414,7 +414,7 @@ type FlattenTests () =
     /// gradient, the feather's residual GROWS toward the ceiling while the
     /// forced interior lands at zero — so without the halo, the verts that
     /// were NEARER the plane ended up FARTHER from it, printing a raised
-    /// ring around the erased pocket (user-reported). The halo pulls that
+    /// ring around the erased pocket. The halo pulls that
     /// approach band to full strength, and the whole dome must come out
     /// dead flat.
     [<TestMethod>]
@@ -606,9 +606,9 @@ type FlattenTests () =
         try
             let s = MeshOrient.App.OrientState()
             s.Load stl |> ignore
-            // Picks by ray, exactly as clicks would arrive. Load re-centres
-            // the model on its bbox, so fixture coordinates go through the
-            // state's own offset to become world rays (rotation is identity).
+            // Picks by ray, exactly as clicks would arrive. Fixture
+            // coordinates go through the state's own offset to become world
+            // rays (it is zero on load, and rotation is identity).
             for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
                 let o = s.Offset
                 let hit = s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
@@ -694,9 +694,9 @@ type FlattenTests () =
             Assert.IsTrue(cleaned.Value.EndsWith "_cleaned.stl")
 
             // Plate-noise spread in each file, measured about the median Y
-            // (the export is bbox-centred, so absolute Y is shifted): the
-            // oriented file must still carry the scan's jitter, the cleaned
-            // one must not.
+            // (the plate's own level, whatever its absolute Y): the oriented
+            // file must still carry the scan's jitter, the cleaned one must
+            // not.
             let plateSpread (path : string) =
                 let m = MeshIO.load path
                 let ys = m.Vertices |> Array.map (fun v -> v.Y)

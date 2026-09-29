@@ -36,7 +36,7 @@ let private lineSize = Marshal.SizeOf<LineVertex>()
 
 // ------------------------------------------------------------------ shaders
 
-// GLSL ES 3.00, matching the CNCFlow renderer: it compiles on every backend
+// GLSL ES 3.00: it compiles on every backend
 // Avalonia might pick (ANGLE/D3D11 on Windows, Metal on macOS, Mesa on Linux)
 // and desktop GL drivers accept it via GL_ARB_ES3_compatibility.
 

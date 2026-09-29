@@ -1,8 +1,5 @@
-/// Cameras for the four panels.
-///
-/// Adapted from CNCFingers' `CNCFlow.Render.Camera` — the orbit maths, the
-/// cursor-ray unprojection and the pan basis are the same problem solved
-/// there, trimmed to what this tool needs and moved to +Z up in millimetres.
+/// Cameras for the four panels: three fixed orthographic views and one
+/// orbiting 3D view. +Z up, millimetres.
 module MeshOrient.App.Camera
 
 open System
@@ -19,8 +16,8 @@ type ViewKind =
     | Back
     | Free
 
-    /// The letter drawn in the panel corner, matching the sketch this was
-    /// designed from. Not `Tag` — F# already generates that on a union.
+    /// The letter drawn in the panel corner. Not `Tag` — F# already
+    /// generates that on a union.
     member k.Label =
         match k with
         | Right -> "R" | Top -> "T" | Back -> "B" | Free -> "3D"
@@ -41,7 +38,7 @@ type ViewKind =
 type Panel = { Kind : ViewKind; Rect : Rect }
 
 /// Left column of three stacked orthographic panels, one large 3D panel to the
-/// right — the layout from the sketch this was designed against.
+/// right.
 ///
 /// A pure function of the control's size rather than something the renderer
 /// records as a side effect, so the window can place its panel captions
@@ -56,16 +53,14 @@ let panelLayout (w : float) (h : float) : Panel[] =
 
 /// Eye direction (from the model toward the camera) and up vector per view.
 ///
-/// THE HANDEDNESS TRAP, because it caught this file once already. The world is
-/// right-handed, so naming three views leaves no free choice: fix the part's
-/// long axis along +X and up along +Z, and its right side is FORCED to -Y,
-/// since right = forward x up. It is NOT +Y.
+/// THE HANDEDNESS TRAP. The world is right-handed, so naming three views
+/// leaves no free choice: fix the part's front along +X and up along +Z, and
+/// its right side is FORCED to -Y, since right = forward x up. It is NOT +Y.
 ///
-/// The Right panel therefore looks from -Y. It looked from +Y at first, which
-/// silently contradicted the Back panel looking from -X: putting the back of
-/// the part in the Back panel forces the front to +X, which makes +Y the LEFT
-/// side, so the "Right" panel showed the part's left (user-reported). The two
-/// labels could not both be true at once for any orientation.
+/// The Right panel therefore looks from -Y. Looking from +Y would contradict
+/// the Back panel looking from -X: putting the back of the part in the Back
+/// panel forces the front to +X, which makes +Y the LEFT side, so a +Y
+/// "Right" panel would show the part's left for every orientation.
 ///
 /// The convention that makes all three consistent, and the one assumed here:
 ///     +X = forward               -X = back

@@ -18,7 +18,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Same stack as CNCFlow.UI, which already runs this combination. -->
     <PackageReference Include="Avalonia" Version="12.0.1" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.1" />

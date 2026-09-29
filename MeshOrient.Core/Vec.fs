@@ -8,7 +8,7 @@ open System.Runtime.CompilerServices
 /// Deliberately NOT System.Numerics.Vector3: that is float32, and this type
 /// carries the *measurement* side of the tool. Accumulating a covariance over
 /// a few million triangle centroids in float32 loses the very fractions of a
-/// degree the Level step exists to remove. Rendering converts down to float32
+/// degree the alignment steps exist to remove. Rendering converts down to float32
 /// at the last moment; nothing upstream of the GPU does.
 [<Struct; IsReadOnly>]
 type Vec3 =
