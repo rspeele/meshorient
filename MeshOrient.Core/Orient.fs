@@ -20,10 +20,6 @@
 /// are the same instruction.
 module MeshOrient.Core.Orient
 
-open System
-
-let private toDegrees r = r * 180.0 / Math.PI
-
 /// The offset that puts the bounding-box centre at the origin, as a
 /// translation rather than a new array.
 let recentreOffset (m : Mesh) : Vec3 =
@@ -60,7 +56,7 @@ let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
     else
         let angle = atan2 s (Vec3.dot n target)
         { Rotation = Mat3.aboutAxis v angle
-          TiltDegrees = toDegrees angle
+          TiltDegrees = Angle.toDegrees angle
           RmsMm = fit.Rms }
 
 /// The two visible components of a tilt, in degrees: rotation about X leans
@@ -69,7 +65,7 @@ let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
 let tiltComponents (picks : Vec3[]) : float * float =
     let fit = Geometry.fitPlane picks
     let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal
-    toDegrees (atan2 n.Z n.Y), toDegrees (atan2 n.X n.Y)
+    Angle.toDegrees (atan2 n.Z n.Y), Angle.toDegrees (atan2 n.X n.Y)
 
 // -------------------------------------------------------- stage 3: straighten
 
@@ -152,6 +148,6 @@ let straightenAbout (lockedAxis : int) (picks : Vec3[]) : StraightenResult =
     // end-for-end — stage 1 already got it the right way round.
     let db, da = if fit.DirX < 0.0 then -fit.DirX, -fit.DirY else fit.DirX, fit.DirY
     let angle = atan2 da db
-    { Rotation = Mat3.rotDegrees lockedAxis (toDegrees angle)
-      AngleDegrees = toDegrees angle
+    { Rotation = Mat3.rotDegrees lockedAxis (Angle.toDegrees angle)
+      AngleDegrees = Angle.toDegrees angle
       RmsMm = fit.Rms }

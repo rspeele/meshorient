@@ -212,7 +212,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     // floor = ceiling degenerates to a hard threshold snap — allowed (the
     // tests use it as the "what the naive version would have done" baseline).
     let floor = Math.Clamp(prm.FloorMm, 0.0, ceiling)
-    let cosGate = cos (prm.NormalGateDegrees * Math.PI / 180.0)
+    let cosGate = cos (Angle.toRadians prm.NormalGateDegrees)
 
     let orient (n : Vec3) = if Vec3.dot n normalHint < 0.0 then -n else n
     let snapDir =
@@ -229,6 +229,8 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
 
     // Position of a canonical id (all copies are identical by construction).
     let inline posOf (cid : int) = m.Vertices[adj.CopyItems[adj.CopyStart[cid]]]
+    // Canonical id of corner `e` (0..2) of face `f`.
+    let inline cornerOf (f : int) (e : int) = adj.Canonical[m.Indices[f * 3 + e]]
 
     // Signed distance per canonical id, memoized. Rebuilt after the refit.
     let dist = Array.create adj.CanonicalCount nan
@@ -261,7 +263,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         else
             let mutable near = infinity
             for e in 0 .. 2 do
-                near <- min near (abs (distOf adj.Canonical[m.Indices[f * 3 + e]]))
+                near <- min near (abs (distOf (cornerOf f e)))
             near <= ceiling
     let queue = Queue<int>()
     let mutable islands = 0
@@ -287,7 +289,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     for f in 0 .. nf - 1 do
         if captured[f] then
             for e in 0 .. 2 do
-                let c = adj.Canonical[m.Indices[f * 3 + e]]
+                let c = cornerOf f e
                 if not inRegion[c] then
                     inRegion[c] <- true
                     regionVerts.Add c
@@ -298,30 +300,13 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
     // exactly as much as it would be snapped — a vert we would not touch
     // does not get a vote.
     for _round in 1 .. 2 do
-        let mutable wsum = 0.0
-        let mutable mean = Vec3.zero
-        for c in regionVerts do
-            let w = weight (abs (distOf c))
-            if w > 0.0 then
-                wsum <- wsum + w
-                mean <- mean + posOf c * w
-        if wsum > 1e-9 then
-            let mean = mean / wsum
-            let mutable xx, xy, xz, yy, yz, zz = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-            for c in regionVerts do
-                let w = weight (abs (distOf c))
-                if w > 0.0 then
-                    let d = posOf c - mean
-                    xx <- xx + w * d.X * d.X
-                    xy <- xy + w * d.X * d.Y
-                    xz <- xz + w * d.X * d.Z
-                    yy <- yy + w * d.Y * d.Y
-                    yz <- yz + w * d.Y * d.Z
-                    zz <- zz + w * d.Z * d.Z
-            let cov =
-                Mat3.ofRows (Vec3.create (xx / wsum) (xy / wsum) (xz / wsum))
-                            (Vec3.create (xy / wsum) (yy / wsum) (yz / wsum))
-                            (Vec3.create (xz / wsum) (yz / wsum) (zz / wsum))
+        let fit =
+            Geometry.weightedCovariance 1e-9 regionVerts.Count
+                (fun k -> posOf regionVerts[k])
+                (fun k -> weight (abs (distOf regionVerts[k])))
+        match fit with
+        | None -> ()
+        | Some(mean, cov) ->
             let eigen = Geometry.eigenSymmetric3 cov
             planeN <- orient (snd eigen[0])
             planeO <- mean
@@ -373,7 +358,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
                 while stack.Count > 0 do
                     let f = stack.Pop()
                     faces.Add f
-                    area <- area + 0.5 * Vec3.length (Mesh.crossArea m f)
+                    area <- area + Mesh.triangleArea m f
                     for e in 0 .. 2 do
                         let nb = adj.Neighbor[f * 3 + e]
                         if nb < 0 then atBoundary <- true
@@ -439,13 +424,13 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         let enclaveMark = Array.zeroCreate<bool> nf
         for f in enclaveFaces do
             enclaveMark[f] <- true
-            for e in 0 .. 2 do forceVert adj.Canonical[m.Indices[f * 3 + e]]
+            for e in 0 .. 2 do forceVert (cornerOf f e)
         // A captured face is halo-eligible while it still has feathered verts;
         // faces fully inside the floor plateau stop the walk.
         let partial f =
             let mutable p = false
             for e in 0 .. 2 do
-                if abs (distOf adj.Canonical[m.Indices[f * 3 + e]]) > floor then p <- true
+                if abs (distOf (cornerOf f e)) > floor then p <- true
             p
         let inHalo = Array.zeroCreate<bool> nf
         let stack = Stack<int>()
@@ -458,7 +443,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         while stack.Count > 0 do
             let f = stack.Pop()
             haloFaces.Add f
-            for e in 0 .. 2 do forceVert adj.Canonical[m.Indices[f * 3 + e]]
+            for e in 0 .. 2 do forceVert (cornerOf f e)
             for e in 0 .. 2 do
                 let nb = adj.Neighbor[f * 3 + e]
                 if nb >= 0 && captured[nb] && not inHalo[nb] && not enclaveMark[nb] && partial nb then
@@ -515,9 +500,7 @@ let preview (m : Mesh) (adj : Adjacency) (seedFaces : int[]) (planePts : Vec3[])
         RmsBeforeMm = if measured = 0 then 0.0 else sqrt (sumSqBefore / float measured)
         RmsAfterMm = if measured = 0 then 0.0 else sqrt (sumSqAfter / float measured)
         MaxMoveMm = maxMove
-        SnapOffAngleDegrees =
-            snapDir |> Option.map (fun s ->
-                acos (Math.Clamp(abs (Vec3.dot planeN s), 0.0, 1.0)) * 180.0 / Math.PI) }
+        SnapOffAngleDegrees = snapDir |> Option.map (Vec3.lineAngleDegrees planeN) }
 
 /// Commit a preview: a new mesh with the moves applied, plus the inverse
 /// (index, old position) list that undoes it. Region-sized, not mesh-sized,

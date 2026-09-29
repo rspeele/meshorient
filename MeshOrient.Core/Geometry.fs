@@ -58,22 +58,29 @@ let eigenSymmetric3 (m : Mat3) : (float * Vec3)[] =
     Array.sortInPlaceBy fst pairs
     pairs
 
-/// Covariance of a set of points about their own mean, with optional weights.
-let private covariance (points : Vec3[]) (weights : float[] option) =
-    let w i = match weights with Some ws -> ws[i] | None -> 1.0
+/// Weighted mean and covariance of `count` points, each fetched by index
+/// along with its weight. `None` when the weights sum to `minWeightSum` or
+/// less — too little evidence to describe a shape.
+///
+/// Index-based rather than array-based so callers can feed a subset or
+/// derived points (Flatten's region verts, a mesh's triangle centroids)
+/// without first copying them into arrays. Both functions are called twice
+/// per index.
+let weightedCovariance (minWeightSum : float) (count : int)
+                       (point : int -> Vec3) (weight : int -> float) : (Vec3 * Mat3) option =
     let mutable wsum = 0.0
     let mutable mean = Vec3.zero
-    for i in 0 .. points.Length - 1 do
-        let wi = w i
+    for i in 0 .. count - 1 do
+        let wi = weight i
         wsum <- wsum + wi
-        mean <- mean + points[i] * wi
-    if wsum <= 0.0 then Vec3.zero, Mat3.identity
+        mean <- mean + point i * wi
+    if wsum <= minWeightSum then None
     else
         let mean = mean / wsum
         let mutable xx, xy, xz, yy, yz, zz = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        for i in 0 .. points.Length - 1 do
-            let d = points[i] - mean
-            let wi = w i
+        for i in 0 .. count - 1 do
+            let d = point i - mean
+            let wi = weight i
             xx <- xx + wi * d.X * d.X
             xy <- xy + wi * d.X * d.Y
             xz <- xz + wi * d.X * d.Z
@@ -84,7 +91,7 @@ let private covariance (points : Vec3[]) (weights : float[] option) =
             {   R0 = { X = xx / wsum; Y = xy / wsum; Z = xz / wsum }
                 R1 = { X = xy / wsum; Y = yy / wsum; Z = yz / wsum }
                 R2 = { X = xz / wsum; Y = yz / wsum; Z = zz / wsum } }
-        mean, c
+        Some(mean, c)
 
 /// A least-squares plane through 3 or more points.
 ///
@@ -97,7 +104,8 @@ type PlaneFit = { Normal : Vec3; Centroid : Vec3; Rms : float }
 let fitPlane (points : Vec3[]) : PlaneFit =
     if points.Length < 3 then
         invalidArg "points" $"need at least 3 points to fit a plane, got {points.Length}"
-    let centroid, cov = covariance points None
+    let centroid, cov =
+        (weightedCovariance 0.0 points.Length (fun i -> points[i]) (fun _ -> 1.0)).Value
     let eigen = eigenSymmetric3 cov
     let normal = snd eigen[0]                        // smallest variance
     let mutable acc = 0.0
@@ -168,11 +176,13 @@ let autoOrient (m : Mesh) : Mat3 =
         System.Threading.Tasks.Parallel.For(0, n, fun t ->
             let struct (a, b, c) = Mesh.triangle m t
             centroids[t] <- (a + b + c) / 3.0
-            areas[t] <- 0.5 * Vec3.length (Vec3.cross (b - a) (c - a))) |> ignore
-        let _, cov = covariance centroids (Some areas)
-        let e = eigenSymmetric3 cov
-        let eSmall, eMid, eLarge = snd e[0], snd e[1], snd e[2]
-        let r = Mat3.ofRows eLarge eSmall eMid
-        // Keep it a rotation, not a reflection — a mirrored scan would flip
-        // the triangle winding and export inside-out.
-        if Mat3.det r < 0.0 then { r with R1 = -r.R1 } else r
+            areas[t] <- Mesh.triangleArea m t) |> ignore
+        match weightedCovariance 0.0 n (fun t -> centroids[t]) (fun t -> areas[t]) with
+        | None -> Mat3.identity                     // no area, no shape
+        | Some(_, cov) ->
+            let e = eigenSymmetric3 cov
+            let eSmall, eMid, eLarge = snd e[0], snd e[1], snd e[2]
+            let r = Mat3.ofRows eLarge eSmall eMid
+            // Keep it a rotation, not a reflection — a mirrored scan would
+            // flip the triangle winding and export inside-out.
+            if Mat3.det r < 0.0 then { r with R1 = -r.R1 } else r

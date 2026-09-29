@@ -21,6 +21,27 @@ module Bounds =
     let size (b : Bounds) = if b.IsEmpty then Vec3.zero else b.Max - b.Min
     let diagonal (b : Bounds) = Vec3.length (size b)
 
+    /// The smallest box holding both.
+    let union (a : Bounds) (b : Bounds) =
+        if a.IsEmpty then b
+        elif b.IsEmpty then a
+        else { Min = Vec3.minOf a.Min b.Min; Max = Vec3.maxOf a.Max b.Max; IsEmpty = false }
+
+
+/// Data-parallel loops over an index range too cheap per item to hand to the
+/// thread pool one index at a time.
+module internal Chunked =
+
+    /// Split `0 .. n-1` into contiguous ranges, run `body lo hi` (hi
+    /// exclusive) on each range in parallel, and return the per-range results
+    /// for the caller to combine.
+    let map (n : int) (body : int -> int -> 'T) : 'T[] =
+        let chunks = max 1 (min 64 (System.Environment.ProcessorCount * 2))
+        let per = (n + chunks - 1) / chunks
+        Array.Parallel.init chunks (fun ci ->
+            let lo = min n (ci * per)
+            body lo (min n (lo + per)))
+
 
 /// A triangle mesh: a vertex array plus a flat index array, three indices per
 /// triangle.
@@ -74,36 +95,25 @@ module Mesh =
     /// zoom out as you turned the model.
     let transformedBounds (rotation : Mat3) (offset : Vec3) (m : Mesh) =
         let v = m.Vertices
-        if v.Length = 0 then Bounds.empty
-        else
-            let chunks = max 1 (min 64 (System.Environment.ProcessorCount * 2))
-            let per = (v.Length + chunks - 1) / chunks
-            Array.Parallel.init chunks (fun ci ->
-                let lo = ci * per
-                let hi = min v.Length (lo + per)
-                let mutable b = Bounds.empty
-                for i in lo .. hi - 1 do
-                    b <- Bounds.expand b (Mat3.apply rotation v[i] + offset)
-                b)
-            |> Array.fold (fun acc b ->
-                if b.IsEmpty then acc
-                elif acc.IsEmpty then b
-                else { Min = Vec3.minOf acc.Min b.Min; Max = Vec3.maxOf acc.Max b.Max; IsEmpty = false })
-                Bounds.empty
+        Chunked.map v.Length (fun lo hi ->
+            let mutable b = Bounds.empty
+            for i in lo .. hi - 1 do
+                b <- Bounds.expand b (Mat3.apply rotation v[i] + offset)
+            b)
+        |> Array.fold Bounds.union Bounds.empty
+
+    /// Twice the area of triangle `t`, as a vector along its normal.
+    let inline crossArea (m : Mesh) (t : int) =
+        let struct (a, b, c) = triangle m t
+        Vec3.cross (b - a) (c - a)
+
+    let triangleArea (m : Mesh) (t : int) = 0.5 * Vec3.length (crossArea m t)
 
     /// Unit normal of triangle `t`, from the winding. Zero-area triangles —
     /// which real scans do contain — come back as the zero vector; callers
     /// that weight by area get the right answer for free, and the renderer
     /// draws a degenerate triangle as nothing anyway.
-    let faceNormal (m : Mesh) (t : int) =
-        let struct (a, b, c) = triangle m t
-        Vec3.normalize (Vec3.cross (b - a) (c - a))
-
-    /// Twice the area of triangle `t`, as a vector along its normal. Halving
-    /// is left to the caller so area-weighted sums can skip it.
-    let inline crossArea (m : Mesh) (t : int) =
-        let struct (a, b, c) = triangle m t
-        Vec3.cross (b - a) (c - a)
+    let faceNormal (m : Mesh) (t : int) = Vec3.normalize (crossArea m t)
 
     /// Median edge length — a robust read on how finely the scan is
     /// tessellated.

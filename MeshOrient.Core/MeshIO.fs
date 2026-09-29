@@ -10,6 +10,28 @@ open System.Buffers.Binary
 open System.Globalization
 open System.IO
 
+// ------------------------------------------------------------- shared helpers
+
+/// Whitespace-separated fields of one line of a text format.
+let private fields (line : string) =
+    line.Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
+
+// Invariant culture throughout: mesh files write '.' decimals whatever the
+// machine's locale says.
+let private parseFloat (s : string) = Double.Parse(s, CultureInfo.InvariantCulture)
+let private parseInt (s : string) = Int32.Parse(s, CultureInfo.InvariantCulture)
+
+/// The point in fields `f[i]`, `f[i + 1]`, `f[i + 2]`.
+let private pointAt (f : string[]) (i : int) =
+    { X = parseFloat f[i]; Y = parseFloat f[i + 1]; Z = parseFloat f[i + 2] }
+
+/// Fan-triangulate one polygon, given as its corner indices, into `idx`.
+let private addFan (idx : ResizeArray<int>) (corners : int[]) =
+    for k in 1 .. corners.Length - 2 do
+        idx.Add corners[0]
+        idx.Add corners[k]
+        idx.Add corners[k + 1]
+
 // ------------------------------------------------------------------- STL in
 
 /// True when the byte stream matches a binary STL exactly: an 84-byte preamble
@@ -41,14 +63,11 @@ let private parseBinaryStl (path : string) (bytes : byte[]) =
 
 let private parseAsciiStl (path : string) (text : string) =
     let tokens = text.Split([| ' '; '\t'; '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-    let ci = CultureInfo.InvariantCulture
     let verts = ResizeArray<Vec3>()
     let mutable i = 0
     while i < tokens.Length do
         if String.Equals(tokens[i], "vertex", StringComparison.OrdinalIgnoreCase) && i + 3 < tokens.Length then
-            verts.Add { X = Double.Parse(tokens[i + 1], ci)
-                        Y = Double.Parse(tokens[i + 2], ci)
-                        Z = Double.Parse(tokens[i + 3], ci) }
+            verts.Add(pointAt tokens (i + 1))
             i <- i + 4
         else i <- i + 1
     if verts.Count % 3 <> 0 then
@@ -64,26 +83,20 @@ let private loadStl (path : string) =
 // ------------------------------------------------------------------- OBJ in
 
 let private loadObj (path : string) =
-    let ci = CultureInfo.InvariantCulture
     let verts = ResizeArray<Vec3>()
     let idx = ResizeArray<int>()
     for line in File.ReadLines path do
         let line = line.AsSpan().Trim()
         if line.StartsWith "v " then
-            let p = line.ToString().Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
-            verts.Add { X = Double.Parse(p[1], ci); Y = Double.Parse(p[2], ci); Z = Double.Parse(p[3], ci) }
+            verts.Add(pointAt (fields (line.ToString())) 1)
         elif line.StartsWith "f " then
-            let p = line.ToString().Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
+            let p = fields (line.ToString())
             // "f 1/2/3" — only the position index matters here. OBJ indices are
             // 1-based, and negative ones count back from the current end.
             let corner (tok : string) =
-                let i = Int32.Parse(tok.Split('/')[0], ci)
+                let i = parseInt (tok.Split('/')[0])
                 if i > 0 then i - 1 else verts.Count + i
-            let c = Array.init (p.Length - 1) (fun k -> corner p[k + 1])
-            for k in 1 .. c.Length - 2 do          // fan-triangulate n-gons
-                idx.Add c[0]
-                idx.Add c[k]
-                idx.Add c[k + 1]
+            addFan idx (Array.init (p.Length - 1) (fun k -> corner p[k + 1]))
     Mesh.create (verts.ToArray()) (idx.ToArray()) path
 
 // ------------------------------------------------------------------- PLY in
@@ -159,11 +172,11 @@ let private loadPly (path : string) =
     let mutable go = true
     while go do
         if pos >= bytes.Length then failwith "Unexpected end of PLY header"
-        let tok = readLine().Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
+        let tok = fields (readLine ())
         if tok.Length > 0 then
             match tok[0] with
             | "format" -> format <- tok[1]
-            | "element" -> elements.Add(tok[1], Int32.Parse tok[2], ResizeArray())
+            | "element" -> elements.Add(tok[1], parseInt tok[2], ResizeArray())
             | "property" ->
                 let _, _, props = elements[elements.Count - 1]
                 if tok[1] = "list" then props.Add(List(tok[4], plyType tok[2], plyType tok[3]))
@@ -174,27 +187,20 @@ let private loadPly (path : string) =
     let verts = ResizeArray<Vec3>()
     let idx = ResizeArray<int>()
 
-    let addFace (c : int[]) =
-        for k in 1 .. c.Length - 2 do
-            idx.Add c[0]
-            idx.Add c[k]
-            idx.Add c[k + 1]
-
     match format with
     | "ascii" ->
-        let ci = CultureInfo.InvariantCulture
         for name, count, props in elements do
             let names = props |> Seq.map (function Scalar(n, _) -> n | List(n, _, _) -> n) |> Seq.toArray
             let ix = Array.IndexOf(names, "x")
             let iy = Array.IndexOf(names, "y")
             let iz = Array.IndexOf(names, "z")
             for _ in 1 .. count do
-                let f = readLine().Split([| ' '; '\t' |], StringSplitOptions.RemoveEmptyEntries)
+                let f = fields (readLine ())
                 if name = "vertex" then
-                    verts.Add { X = Double.Parse(f[ix], ci); Y = Double.Parse(f[iy], ci); Z = Double.Parse(f[iz], ci) }
+                    verts.Add { X = parseFloat f[ix]; Y = parseFloat f[iy]; Z = parseFloat f[iz] }
                 elif name = "face" then
-                    let n = Int32.Parse(f[0], ci)
-                    addFace (Array.init n (fun k -> Int32.Parse(f[k + 1], ci)))
+                    let n = parseInt f[0]
+                    addFan idx (Array.init n (fun k -> parseInt f[k + 1]))
     | "binary_little_endian" | "binary_big_endian" ->
         let big = format = "binary_big_endian"
         for name, count, props in elements do
@@ -220,7 +226,10 @@ let private loadPly (path : string) =
                                 Y = readPlyScalar bytes (pos + oy) ty big
                                 Z = readPlyScalar bytes (pos + oz) tz big }
                     pos <- pos + stride
-            elif name = "face" then
+            else
+                // Walk every other element record by record: face lists are
+                // read, anything else (edge, material...) is stepped over.
+                let isFace = name = "face"
                 for _ in 1 .. count do
                     for p in props do
                         match p with
@@ -228,18 +237,10 @@ let private loadPly (path : string) =
                         | List(_, ct, it) ->
                             let n = int (readPlyScalar bytes pos ct big)
                             pos <- pos + ct.Size
-                            let c = Array.init n (fun k -> int (readPlyScalar bytes (pos + k * it.Size) it big))
+                            if isFace then
+                                addFan idx (Array.init n (fun k ->
+                                    int (readPlyScalar bytes (pos + k * it.Size) it big)))
                             pos <- pos + n * it.Size
-                            addFace c
-            else
-                // Skip a whole element we do not care about (edge, material...).
-                for _ in 1 .. count do
-                    for p in props do
-                        match p with
-                        | Scalar(_, t) -> pos <- pos + t.Size
-                        | List(_, ct, it) ->
-                            let n = int (readPlyScalar bytes pos ct big)
-                            pos <- pos + ct.Size + n * it.Size
     | f -> failwithf "Unsupported PLY format '%s'" f
 
     Mesh.create (verts.ToArray()) (idx.ToArray()) path
@@ -276,7 +277,7 @@ let saveStlBinary (path : string) (m : Mesh) =
     System.Threading.Tasks.Parallel.For(0, n, fun t ->
         let struct (a, b, c) = Mesh.triangle m t
         let off = 84 + t * 50
-        put off (Vec3.normalize (Vec3.cross (b - a) (c - a)))
+        put off (Mesh.faceNormal m t)
         put (off + 12) a
         put (off + 24) b
         put (off + 36) c) |> ignore

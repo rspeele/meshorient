@@ -44,33 +44,25 @@ let private hitTriangle (a : Vec3) (b : Vec3) (c : Vec3) (ray : Ray) : float =
 /// milliseconds spread over the cores, which is imperceptible, whereas a BVH is
 /// a tree to build, keep in sync with every re-orientation, and get wrong.
 let intersect (mesh : Mesh) (ray : Ray) : Hit option =
-    let n = mesh.TriangleCount
-    if n = 0 then None
+    let struct (t, tri) =
+        Chunked.map mesh.TriangleCount (fun lo hi ->
+            let mutable bt = infinity
+            let mutable bi = -1
+            for t in lo .. hi - 1 do
+                let struct (a, b, c) = Mesh.triangle mesh t
+                let d = hitTriangle a b c ray
+                if not (Double.IsNaN d) && d < bt then
+                    bt <- d
+                    bi <- t
+            struct (bt, bi))
+        |> Array.fold (fun (struct (bt, bi) as acc) (struct (t, i)) ->
+            if i >= 0 && t < bt then struct (t, i) else acc) (struct (infinity, -1))
+    if tri < 0 then None
     else
-        let chunks = max 1 (min 64 (Environment.ProcessorCount * 2))
-        let per = (n + chunks - 1) / chunks
-        let best =
-            Array.Parallel.init chunks (fun ci ->
-                let lo = ci * per
-                let hi = min n (lo + per)
-                let mutable bt = infinity
-                let mutable bi = -1
-                for t in lo .. hi - 1 do
-                    let struct (a, b, c) = Mesh.triangle mesh t
-                    let d = hitTriangle a b c ray
-                    if not (Double.IsNaN d) && d < bt then
-                        bt <- d
-                        bi <- t
-                struct (bt, bi))
-            |> Array.fold (fun (struct (bt, bi) as acc) (struct (t, i)) ->
-                if i >= 0 && t < bt then struct (t, i) else acc) (struct (infinity, -1))
-        let struct (t, tri) = best
-        if tri < 0 then None
-        else
-            let nrm = Mesh.faceNormal mesh tri
-            // Point the normal back at the viewer regardless of winding.
-            let nrm = if Vec3.dot nrm ray.Direction > 0.0 then -nrm else nrm
-            Some { Distance = t
-                   Point = ray.Origin + ray.Direction * t
-                   Triangle = tri
-                   Normal = nrm }
+        let nrm = Mesh.faceNormal mesh tri
+        // Point the normal back at the viewer regardless of winding.
+        let nrm = if Vec3.dot nrm ray.Direction > 0.0 then -nrm else nrm
+        Some { Distance = t
+               Point = ray.Origin + ray.Direction * t
+               Triangle = tri
+               Normal = nrm }

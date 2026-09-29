@@ -3,6 +3,11 @@ namespace MeshOrient.Core
 open System
 open System.Runtime.CompilerServices
 
+module Angle =
+
+    let inline toRadians (degrees : float) = degrees * Math.PI / 180.0
+    let inline toDegrees (radians : float) = radians * 180.0 / Math.PI
+
 /// A 3-vector in double precision.
 ///
 /// Deliberately NOT System.Numerics.Vector3: that is float32, and this type
@@ -65,6 +70,12 @@ module Vec3 =
         | 1 -> unitY
         | 2 -> unitZ
         | _ -> invalidArg "i" $"axis index must be 0, 1 or 2, not {i}"
+
+    /// Angle in degrees (0..90) between the LINES along unit vectors `a` and
+    /// `b`, ignoring sign — the right measure for plane normals, which have
+    /// no preferred direction.
+    let lineAngleDegrees (a : Vec3) (b : Vec3) =
+        Angle.toDegrees (acos (Math.Clamp(abs (dot a b), 0.0, 1.0)))
 
     let minOf (a : Vec3) (b : Vec3) =
         { X = min a.X b.X; Y = min a.Y b.Y; Z = min a.Z b.Z }
@@ -134,7 +145,7 @@ module Mat3 =
             R2 = { X = 0.0; Y = 0.0; Z = 1.0 } }
 
     let rotDegrees (axis : int) (degrees : float) =
-        let r = degrees * Math.PI / 180.0
+        let r = Angle.toRadians degrees
         match axis with
         | 0 -> rotX r
         | 1 -> rotY r
