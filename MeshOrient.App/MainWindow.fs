@@ -145,7 +145,7 @@ type MainWindow() as this =
             refresh ()
             let b = state.Bounds
             let s = Bounds.size b
-            setStatus $"{Path.GetFileName path}: {m.TriangleCount} triangles, %.1f{s.X} x %.1f{s.Y} x %.1f{s.Z} mm. Auto-orient, then Square."
+            setStatus $"{Path.GetFileName path}: {m.TriangleCount} triangles, %.1f{s.X} x %.1f{s.Y} x %.1f{s.Z} mm. Auto-orient, then Orient Face to Side."
         with e ->
             setStatus $"Could not load {Path.GetFileName path}: {e.Message}"
 
@@ -181,7 +181,7 @@ type MainWindow() as this =
         | Ok r ->
             view.FrameCamera()
             refresh ()
-            setStatus $"Straightened: spun %.3f{r.AngleDegrees}° about Y so the picked face is level. Points were collinear to ±%.3f{r.RmsMm} mm. The Y squaring is untouched — rotating about Y is the only move that leaves it alone."
+            setStatus $"Y-spun %.3f{r.AngleDegrees}° about Y so the picked face is level. Points were collinear to ±%.3f{r.RmsMm} mm. The side face is still square to Y — rotating about Y is the only move that leaves it alone."
 
     let doYCenterline () =
         match state.ApplyYCenterline() with
@@ -333,7 +333,7 @@ type MainWindow() as this =
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
         btSquare <- button "Orient Face to Side"
-                        "Square the picked face to Y — needs 3+ points on one flat SIDE face"
+                        "Turn the picked face square to Y — needs 3+ points on one flat SIDE face"
                         doSquare
         btStraighten <- button "Y-Spin Face to Level"
                             "Spin about Y until the picked face is level — needs 2+ points on a flat TOP or BOTTOM face"
@@ -347,7 +347,7 @@ type MainWindow() as this =
         toolbar.Children.Add btStraighten
         toolbar.Children.Add btCenterline
         toolbar.Children.Add(button "Clear picks" "Drop every picked point" doClearPicks)
-        toolbar.Children.Add(button "Undo" "Step back one orientation change" doUndo)
+        toolbar.Children.Add(button "Undo" "Step back one change: a rotation, Y-Centerline or applied flatten" doUndo)
         toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
                                     Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
         toolbar.Children.Add(button "Export STL"
@@ -376,7 +376,7 @@ type MainWindow() as this =
             "Snap the YELLOW pockets flat too, however far out their verts sit — for scanner "
             + "blobs and dents living inside the flat. Leave off when an enclave is a real feature.")
         ToolTip.SetTip(cbSnap,
-            "Your picks' plane is within a fraction of a degree of a true axis-normal plane, "
+            $"Your picks' plane is within %g{Flatten.axisSnapThresholdDegrees}° of a true axis-normal plane, "
             + "so it is presumably meant to BE one. Checked: flatten onto that exact plane, so "
             + "every such flat comes out parallel and later cube booleans sit flush. "
             + "Unchecked: flatten onto the fitted plane exactly as detected.")
