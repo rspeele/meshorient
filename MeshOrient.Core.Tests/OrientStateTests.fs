@@ -173,6 +173,23 @@ type OrientStateTests () =
         Assert.AreEqual(before.X, back.X, 1e-9, "X restored")
         Assert.AreEqual(before.Z, back.Z, 1e-9, "Z restored")
 
+    /// When the history is full, the step that falls off must be the OLDEST.
+    /// Dropping the newest instead makes every action past the limit
+    /// un-undoable, and Undo then jumps back past it.
+    [<TestMethod>]
+    member _.Full_undo_history_drops_the_oldest_step () =
+        let s = loaded ()
+        let angleAboutZ () = atan2 s.Rotation.R1.X s.Rotation.R0.X * 180.0 / Math.PI
+        for _ in 1 .. 40 do s.ApplyRotation(Mat3.rotDegrees 2 1.0)
+        Assert.AreEqual(40.0, angleAboutZ (), 1e-9)
+        // The 32 newest steps come back one degree at a time...
+        for expected in 39 .. -1 .. 8 do
+            Assert.IsTrue(s.CanUndo, $"should still be able to undo back to {expected} deg")
+            s.Undo() |> ignore
+            Assert.AreEqual(float expected, angleAboutZ (), 1e-9, "each undo steps back exactly one action")
+        // ...and the 8 oldest are gone.
+        Assert.IsFalse(s.CanUndo, "history holds 32 steps")
+
     /// Both operations read the SAME pick list, and there is no mode to have
     /// set wrong.
     ///

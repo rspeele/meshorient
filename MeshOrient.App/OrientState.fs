@@ -42,13 +42,18 @@ type private UndoEntry =
 module private Constants =
     let lockedAxis = 1
 
+    /// How many steps Undo can go back.
+    let maxUndo = 32
+
 type OrientState() =
 
     let mutable mesh : Mesh option = None
     let mutable rotation = Mat3.identity
     let mutable offset = Vec3.zero
     let mutable bounds = Bounds.empty
-    let undo = System.Collections.Generic.Stack<UndoEntry>()
+    /// Newest step last. A linked list rather than a Stack so the step that
+    /// falls off when the history is full is the OLDEST one.
+    let undo = System.Collections.Generic.LinkedList<UndoEntry>()
 
     // FLATTEN state. Adjacency is the exact-bit weld + face graph — built on
     // the first preview, cached for the life of the mesh (moving verts never
@@ -162,10 +167,10 @@ type OrientState() =
     // --------------------------------------------------------- transforms
 
     member private _.PushUndo(entry : UndoEntry) =
-        undo.Push entry
+        undo.AddLast entry |> ignore
         // A handful of steps is all anyone backtracks; unbounded growth on a
         // long session is not worth the memory.
-        while undo.Count > 32 do undo.Pop() |> ignore
+        while undo.Count > maxUndo do undo.RemoveFirst()
 
     /// Compose an extra world-space rotation on top of what we have, then
     /// re-centre. Picks are untouched: they are model-space, so they follow.
@@ -181,7 +186,9 @@ type OrientState() =
     member this.Undo() : bool =
         if undo.Count = 0 then false
         else
-            match undo.Pop() with
+            let entry = undo.Last.Value
+            undo.RemoveLast()
+            match entry with
             | Rigid(r, o) ->
                 rotation <- r
                 offset <- o
