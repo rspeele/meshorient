@@ -57,9 +57,10 @@ type OrientState() =
 
     // FLATTEN state. Adjacency is the exact-bit weld + face graph — built on
     // the first preview, cached for the life of the mesh (moving verts never
-    // changes the topology it encodes). The preview is entirely MODEL-space,
-    // so rotations do not invalidate it; only pick edits and parameter edits
-    // do, which is what the version counters track.
+    // changes the topology it encodes). The preview is MODEL-space, so a
+    // rotation leaves it valid — unless it snapped to a world axis, which
+    // `setRotation` handles. Pick edits and parameter edits stale it too,
+    // which is what the version counters track.
     let mutable adjacency : Flatten.Adjacency option = None
     let mutable preview : Flatten.Preview option = None
     let mutable previewParams = (nan, nan, false, false)
@@ -85,6 +86,17 @@ type OrientState() =
         if preview.IsSome then
             preview <- None
             previewStamp <- previewStamp + 1
+
+    /// Every rotation change after load goes through here. A snapped preview
+    /// is dropped: its snap direction was "true X/Y/Z" under the OLD rotation,
+    /// and applying it after a turn would flatten onto a plane that is no
+    /// longer axis-true — the very thing the snap exists to prevent.
+    let setRotation (r : Mat3) =
+        if r <> rotation then
+            rotation <- r
+            match preview with
+            | Some pv when pv.SnapOffAngleDegrees.IsSome -> dropPreview ()
+            | _ -> ()
 
     let reframe () =
         match mesh with
@@ -177,7 +189,7 @@ type OrientState() =
     member this.ApplyRotation(r : Mat3) =
         if mesh.IsSome then
             this.PushUndo(Rigid(rotation, offset))
-            rotation <- Mat3.mul r rotation
+            setRotation (Mat3.mul r rotation)
             recentre ()
 
     /// Returns true when the mesh's VERTICES changed (a flatten was undone),
@@ -190,7 +202,7 @@ type OrientState() =
             undo.RemoveLast()
             match entry with
             | Rigid(r, o) ->
-                rotation <- r
+                setRotation r
                 offset <- o
                 reframe ()
                 false
@@ -215,7 +227,7 @@ type OrientState() =
             // replaces the accumulated rotation rather than composing onto it.
             // Composing would mean pressing the button twice moved the model
             // twice, which is not what "auto-orient" can possibly mean.
-            rotation <- Geometry.autoOrient m
+            setRotation (Geometry.autoOrient m)
             recentre ()
 
     member this.Recentre() =

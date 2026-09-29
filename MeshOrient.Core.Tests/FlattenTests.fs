@@ -762,6 +762,49 @@ type FlattenTests () =
             for f in toDelete do
                 if File.Exists f then File.Delete f
 
+    /// A snapped preview targets "true Y" as it was under the rotation it was
+    /// computed with. Once the model turns, that direction is no longer world
+    /// Y, so the preview must not survive to be applied. An unsnapped preview
+    /// is pure model space and does survive.
+    [<TestMethod>]
+    member _.Rotating_drops_a_snapped_preview_but_keeps_a_free_one () =
+        let s, stl = wallState ()
+        try
+            // Tilt the plate 1.5 deg off world Y: inside the snap threshold.
+            s.ApplyRotation(Mat3.rotDegrees 0 1.5)
+            pickPlate s
+            Assert.AreEqual(Some 1, s.AxisSnapCandidate |> Option.map fst, "Y snap should be offered")
+            let floor = 3.0 * sigma
+
+            // Free fit: survives a rotation.
+            s.ComputeFlattenPreview(floor, 0.3, false, false) |> ignore
+            s.ApplyRotation(Mat3.rotDegrees 2 90.0)
+            Assert.IsTrue(s.PreviewIsCurrent(floor, 0.3, false, false), "a model-space preview outlives a turn")
+            s.Undo() |> ignore
+
+            // Snapped: dropped by the rotation, so it can never be applied stale.
+            match s.ComputeFlattenPreview(floor, 0.3, false, true) with
+            | Error e -> Assert.Fail e
+            | Ok pv -> Assert.IsTrue(pv.SnapOffAngleDegrees.IsSome, "the preview should have snapped")
+            match s.ApplySquare() with
+            | Error e -> Assert.Fail e
+            | Ok _ -> ()
+            Assert.IsTrue(s.Preview.IsNone, "the rotation must drop the snapped preview")
+            Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false, true))
+            match s.ApplyFlatten() with
+            | Ok _ -> Assert.Fail "a snapped preview from before the rotation was applied"
+            | Error _ -> ()
+
+            // Re-previewed under the new rotation, the target is world Y exactly.
+            match s.ComputeFlattenPreview(floor, 0.3, false, true) with
+            | Error e -> Assert.Fail e
+            | Ok pv ->
+                let off = Fixtures.degreesBetween (Mat3.apply s.Rotation pv.PlaneNormal) Vec3.unitY
+                printfn "re-previewed snap plane is %.2e deg off world Y" off
+                Assert.IsTrue(off < 1e-6, $"snapped plane should be world Y, got {off} deg off")
+        finally
+            if File.Exists stl then File.Delete stl
+
     [<TestMethod>]
     member _.Rigid_undo_still_reports_no_mesh_change () =
         let s = MeshOrient.App.OrientState()
