@@ -30,7 +30,10 @@ type Pick = { Point : Vec3; Normal : Vec3; Triangle : int }
 /// of them stays cheap — snapshotting the whole 2.4M-vert array would not).
 type private UndoEntry =
     | Rigid of Mat3 * Vec3
-    | Reshape of (int * Vec3)[]
+    /// The (vertex index, old position) pairs to restore — one per soup
+    /// copy — plus the canonical vertex count the flatten added to
+    /// `flattenedVerts`, which is what undoing it must take back off.
+    | Reshape of restore : (int * Vec3)[] * movedVertexCount : int
 
 /// The axis SQUARE targets and STRAIGHTEN rotates about. Hard-coded to Y
 /// (across the frame) — the core functions both take an axis index, so
@@ -184,14 +187,14 @@ type OrientState() =
                 offset <- o
                 reframe ()
                 false
-            | Reshape old ->
+            | Reshape(old, moved) ->
                 match mesh with
                 | None -> false
                 | Some m ->
                     let verts = Array.copy m.Vertices
                     for (i, pos) in old do verts[i] <- pos
                     mesh <- Some { m with Vertices = verts }
-                    flattenedVerts <- max 0 (flattenedVerts - old.Length)
+                    flattenedVerts <- flattenedVerts - moved
                     dropPreview ()
                     reframe ()
                     true
@@ -456,7 +459,7 @@ type OrientState() =
         | Some m, Some pv ->
             let flattened, undoData = Flatten.apply m pv
             mesh <- Some flattened
-            this.PushUndo(Reshape undoData)
+            this.PushUndo(Reshape(undoData, pv.MovedVertexCount))
             flattenedVerts <- flattenedVerts + pv.MovedVertexCount
             dropPreview ()
             reframe ()

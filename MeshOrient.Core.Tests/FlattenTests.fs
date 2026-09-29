@@ -182,6 +182,26 @@ type FlattenTests () =
         Flatten.preview m adj seeds pts hint
             { Flatten.defaults with FloorMm = floor; CeilingMm = ceiling }
 
+    /// The wall fixture written out as STL soup and loaded through the app
+    /// state, the way a real scan arrives. Returns the state and the temp
+    /// file, which the caller deletes.
+    let wallState () =
+        let stl = Path.Combine(Path.GetTempPath(), $"meshorient_wall_{Guid.NewGuid():N}.stl")
+        MeshIO.saveStlBinary stl (FlattenFixtures.wall sigma)
+        let s = MeshOrient.App.OrientState()
+        s.Load stl |> ignore
+        s, stl
+
+    /// Three picks on the wall's plate, clear of the boss, rib and window.
+    /// Fixture (model) coordinates go through the state's current transform,
+    /// so this works whatever orientation the model is in.
+    let pickPlate (s : MeshOrient.App.OrientState) =
+        for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
+            let w = Mat3.apply s.Rotation (Vec3.create x 0.0 z) + s.Offset
+            let hit = s.PickAt { Raycast.Origin = Vec3.create w.X 1000.0 w.Z
+                                 Raycast.Direction = Vec3.create 0.0 -1.0 0.0 }
+            Assert.IsTrue(hit.IsSome, $"pick at ({x}, {z}) should land")
+
     // ------------------------------------------------------------ adjacency
 
     [<TestMethod>]
@@ -705,6 +725,39 @@ type FlattenTests () =
             Assert.AreEqual(sb.Min.X, ab.Min.X, 1e-12, "no hidden translation")
             Assert.AreEqual(sb.Max.Y, ab.Max.Y, 1e-12, "no hidden translation")
             Assert.AreEqual(sb.Min.Z, ab.Min.Z, 1e-12, "no hidden translation")
+        finally
+            for f in toDelete do
+                if File.Exists f then File.Delete f
+
+    /// Undoing the second of two flattens must leave the first one counted:
+    /// the count is what decides whether Export writes `_cleaned`, so if it
+    /// drops to zero while a flatten is still baked in, that work is in no
+    /// file at all.
+    [<TestMethod>]
+    member _.Undoing_one_of_two_flattens_keeps_the_other_in_the_export () =
+        let s, stl = wallState ()
+        let mutable toDelete = [ stl ]
+        try
+            pickPlate s
+            let flatten ceiling =
+                match s.ComputeFlattenPreview(3.0 * sigma, ceiling, false, false) with
+                | Error e -> Assert.Fail e
+                | Ok _ -> ()
+                match s.ApplyFlatten() with
+                | Error e -> Assert.Fail e; 0
+                | Ok pv -> pv.MovedVertexCount
+            let first = flatten 0.3
+            let second = flatten 0.35
+            Assert.AreEqual(first + second, s.FlattenedVertexCount)
+
+            Assert.IsTrue(s.Undo(), "undoing a flatten is a mesh change")
+            Assert.AreEqual(first, s.FlattenedVertexCount, "undo takes back only the second flatten")
+            let oriented, cleaned = s.ExportStl()
+            toDelete <- oriented :: Option.toList cleaned @ toDelete
+            Assert.IsTrue(cleaned.IsSome, "the first flatten is still applied, so _cleaned must be written")
+
+            Assert.IsTrue(s.Undo())
+            Assert.AreEqual(0, s.FlattenedVertexCount, "both undone")
         finally
             for f in toDelete do
                 if File.Exists f then File.Delete f
