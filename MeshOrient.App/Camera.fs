@@ -151,16 +151,18 @@ let eyePosition (c : Orbit) =
     let cosY, sinY = MathF.Cos c.Yaw, MathF.Sin c.Yaw
     c.Target + Vector3(cosP * cosY, cosP * sinY, sinP) * c.Distance
 
-let orbitMatrices (c : Orbit) (aspect : float32) =
-    let eye = eyePosition c
-    // Up is the TANGENT of the orbit sphere, not a constant world-up: at
-    // ordinary pitches LookAt orthonormalises both to the identical basis,
-    // but a constant (0,0,1) degenerates when a numpad-7 preset puts the
-    // camera exactly at the pole, and the tangent never does.
+/// The camera's up vector: the TANGENT of the orbit sphere, not a constant
+/// world-up. At ordinary pitches the two give the identical basis, but a
+/// constant (0,0,1) is parallel to the view direction when a numpad-7 preset
+/// puts the camera exactly at the pole, and the tangent never is.
+let private orbitUp (c : Orbit) =
     let cosP, sinP = MathF.Cos c.Pitch, MathF.Sin c.Pitch
     let cosY, sinY = MathF.Cos c.Yaw, MathF.Sin c.Yaw
-    let up = Vector3(-sinP * cosY, -sinP * sinY, cosP)
-    let view = Matrix4x4.CreateLookAt(eye, c.Target, up)
+    Vector3(-sinP * cosY, -sinP * sinY, cosP)
+
+let orbitMatrices (c : Orbit) (aspect : float32) =
+    let eye = eyePosition c
+    let view = Matrix4x4.CreateLookAt(eye, c.Target, orbitUp c)
     // Near/far scale with distance so a big scan and a small one both get
     // usable depth precision without any per-model tuning.
     let near = max 0.05f (c.Distance * 0.01f)
@@ -186,12 +188,14 @@ let zoom (factor : float32) (c : Orbit) =
 
 /// Drag the pivot across the screen plane. `dx`/`dy` are in pixels; the scale
 /// converts to world units so panning tracks the cursor at any zoom.
+///
+/// The screen axes come from the same basis `orbitMatrices` renders with.
+/// Deriving them from a constant world-up instead breaks at the numpad-7
+/// pole, where rounding in cos(pitch) picks the sign and inverted the pan.
 let pan (dx : float32) (dy : float32) (viewportHeight : float32) (c : Orbit) =
-    let eye = eyePosition c
-    let forward = Vector3.Normalize(c.Target - eye)
-    let worldUp = Vector3(0.0f, 0.0f, 1.0f)
-    let right = Vector3.Normalize(Vector3.Cross(forward, worldUp))
-    let up = Vector3.Normalize(Vector3.Cross(right, forward))
+    let forward = Vector3.Normalize(c.Target - eyePosition c)
+    let up = orbitUp c
+    let right = Vector3.Cross(forward, up)
     let worldPerPixel = 2.0f * c.Distance * MathF.Tan(c.FovY * 0.5f) / max 1.0f viewportHeight
     { c with Target = c.Target + (right * -dx + up * dy) * worldPerPixel }
 
