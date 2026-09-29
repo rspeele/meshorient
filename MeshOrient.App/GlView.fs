@@ -306,8 +306,7 @@ type GlView(state : OrientState) as this =
                 for centre in state.MarkersWorld do
                     let m =
                         Matrix4x4.CreateScale markerR
-                        * Matrix4x4.CreateTranslation(
-                            Vector3(float32 centre.X, float32 centre.Y, float32 centre.Z))
+                        * Matrix4x4.CreateTranslation(Float32.ofVec3 centre)
                     Scene.drawLit gl progs sphereBuf m view proj pickColour
 
                 // Overlays only in the panels they mean something in: the

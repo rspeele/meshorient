@@ -12,7 +12,6 @@
 /// exercised without a window.
 namespace MeshOrient.App
 
-open System
 open MeshOrient.Core
 
 /// A picked point, in MODEL space. The surface normal comes along so the
@@ -93,6 +92,17 @@ type OrientState() =
             | Some pv when pv.SnapOffAngleDegrees.IsSome -> dropPreview ()
             | _ -> ()
 
+    let toWorld (p : Vec3) = Mat3.apply rotation p + offset
+
+    let pushUndo (entry : UndoEntry) =
+        undo.AddLast entry |> ignore
+        // A handful of steps is all anyone backtracks; unbounded growth on a
+        // long session is not worth the memory.
+        while undo.Count > maxUndo do undo.RemoveFirst()
+
+    /// Record the current rigid transform so Undo can return to it.
+    let pushRigid () = pushUndo (Rigid(rotation, offset))
+
     let reframe () =
         match mesh with
         | Some m -> bounds <- Mesh.transformedBounds rotation offset m
@@ -133,18 +143,16 @@ type OrientState() =
     /// Every picked point, in model space. One list, both operations.
     member _.Picks = picks
 
-    member private _.ToWorld(p : Pick) = Mat3.apply rotation p.Point + offset
-
     /// Marker centres: the hit point nudged a little way out along the surface
     /// normal so the sphere sits proud of the face rather than half-buried in
     /// it, z-fighting.
     member this.MarkersWorld =
         let r = this.MarkerRadius * 0.5
         picks
-        |> Seq.map (fun p -> Mat3.apply rotation (p.Point + p.Normal * r) + offset)
+        |> Seq.map (fun p -> toWorld (p.Point + p.Normal * r))
         |> Seq.toArray
 
-    member this.PicksWorld = picks |> Seq.map this.ToWorld |> Seq.toArray
+    member _.PicksWorld = picks |> Seq.map (fun p -> toWorld p.Point) |> Seq.toArray
 
     /// How big a pick marker should be so it reads the same on a 20 mm part
     /// and a 400 mm one.
@@ -171,24 +179,18 @@ type OrientState() =
 
     // --------------------------------------------------------- transforms
 
-    member private _.PushUndo(entry : UndoEntry) =
-        undo.AddLast entry |> ignore
-        // A handful of steps is all anyone backtracks; unbounded growth on a
-        // long session is not worth the memory.
-        while undo.Count > maxUndo do undo.RemoveFirst()
-
     /// Compose an extra world-space rotation on top of what we have, then
     /// re-centre. Picks are untouched: they are model-space, so they follow.
-    member this.ApplyRotation(r : Mat3) =
+    member _.ApplyRotation(r : Mat3) =
         if mesh.IsSome then
-            this.PushUndo(Rigid(rotation, offset))
+            pushRigid ()
             setRotation (Mat3.mul r rotation)
             recentre ()
 
     /// Returns true when the mesh's VERTICES changed (a flatten was undone),
     /// so the caller knows the GPU copy is stale — a rigid undo only moves
     /// the model matrix and costs nothing.
-    member this.Undo() : bool =
+    member _.Undo() : bool =
         if undo.Count = 0 then false
         else
             let entry = undo.Last.Value
@@ -211,11 +213,11 @@ type OrientState() =
                     reframe ()
                     true
 
-    member this.AutoOrient() =
+    member _.AutoOrient() =
         match mesh with
         | None -> ()
         | Some m ->
-            this.PushUndo(Rigid(rotation, offset))
+            pushRigid ()
             // PCA is a property of the mesh as it sits in MODEL space, so it
             // replaces the accumulated rotation rather than composing onto it.
             // Composing would mean pressing the button twice moved the model
@@ -223,9 +225,9 @@ type OrientState() =
             setRotation (Geometry.autoOrient m)
             recentre ()
 
-    member this.Recentre() =
+    member _.Recentre() =
         if mesh.IsSome then
-            this.PushUndo(Rigid(rotation, offset))
+            pushRigid ()
             recentre ()
 
     // -------------------------------------------------------------- picks
@@ -252,13 +254,13 @@ type OrientState() =
         | Some hit ->
             picks.Add { Point = hit.Point; Normal = hit.Normal; Triangle = hit.Triangle }
             picksChanged ()
-            Some(Mat3.apply rotation hit.Point + offset)
+            Some(toWorld hit.Point)
 
     /// Remove whichever pick is nearest where this ray hits the mesh.
     member this.RemovePickAlong(ray : Raycast.Ray) : bool =
         match this.Trace ray with
         | None -> false
-        | Some hit -> this.RemoveNearestPick(Mat3.apply rotation hit.Point + offset)
+        | Some hit -> this.RemoveNearestPick(toWorld hit.Point)
 
     /// Drop the pick nearest a world-space point, for right-click-to-remove.
     member _.RemoveNearestPick(world : Vec3) =
@@ -266,7 +268,7 @@ type OrientState() =
         else
             let mutable best, bestD = -1, infinity
             for i in 0 .. picks.Count - 1 do
-                let d = Vec3.lengthSq (Mat3.apply rotation picks[i].Point + offset - world)
+                let d = Vec3.lengthSq (toWorld picks[i].Point - world)
                 if d < bestD then bestD <- d; best <- i
             picks.RemoveAt best
             picksChanged ()
@@ -322,7 +324,7 @@ type OrientState() =
                 Error($"One group of picks spreads %.2f{s} mm in Y — more than one face, "
                       + "or a pick missed. Remove the stray (right-click) and retry.")
             | Ok r ->
-                this.PushUndo(Rigid(rotation, offset))
+                pushRigid ()
                 offset <- offset + Vec3.create 0.0 r.ShiftY 0.0
                 reframe ()
                 Ok r
@@ -405,7 +407,7 @@ type OrientState() =
             let ax = if c[0] >= c[1] && c[0] >= c[2] then 0
                      elif c[1] >= c[2] then 1
                      else 2
-            let off = acos (Math.Clamp(c[ax], 0.0, 1.0)) * 180.0 / Math.PI
+            let off = Vec3.lineAngleDegrees n (Vec3.axis ax)
             if off <= Flatten.axisSnapThresholdDegrees then Some(ax, off) else None
 
     /// Suggested noise floor: 3x the plane-fit RMS of the picks — the scan's
@@ -463,14 +465,14 @@ type OrientState() =
 
     /// Commit the shown preview. Picks are KEPT — re-running the same flat at
     /// a different ceiling is the common follow-up, and clearing is one click.
-    member this.ApplyFlatten() : Result<Flatten.Preview, string> =
+    member _.ApplyFlatten() : Result<Flatten.Preview, string> =
         match mesh, preview with
         | _, None -> Error "Nothing to apply — press FLATTEN to preview first."
         | None, _ -> Error "Load a scan first."
         | Some m, Some pv ->
             let flattened, undoData = Flatten.apply m pv
             mesh <- Some flattened
-            this.PushUndo(Reshape(undoData, pv.MovedVertexCount))
+            pushUndo (Reshape(undoData, pv.MovedVertexCount))
             flattenedVerts <- flattenedVerts + pv.MovedVertexCount
             dropPreview ()
             reframe ()

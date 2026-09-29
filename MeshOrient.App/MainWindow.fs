@@ -12,6 +12,18 @@ open Avalonia.Platform.Storage
 open MeshOrient.Core
 open MeshOrient.App.Camera
 
+/// Styling and labels used in more than one place in the window.
+module private Ui =
+    let mono = FontFamily "Consolas,Menlo,monospace"
+    let dimText = SolidColorBrush(Color.FromRgb(0x9Auy, 0xA4uy, 0xB0uy))
+
+    let separator () =
+        Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
+               Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy)))
+
+    /// 'X', 'Y' or 'Z' for axis index 0, 1 or 2.
+    let axisName (axis : int) = "XYZ"[axis]
+
 type MainWindow() as this =
     inherit Window()
 
@@ -22,11 +34,11 @@ type MainWindow() as this =
     // in its own orientation, so a long status message runs straight under the
     // fit readout instead of being laid out beside it.
     let status = TextBlock(Margin = Thickness(10.0, 5.0), VerticalAlignment = VerticalAlignment.Center,
-                           FontFamily = FontFamily "Consolas,Menlo,monospace", FontSize = 12.0,
+                           FontFamily = Ui.mono, FontSize = 12.0,
                            TextWrapping = TextWrapping.Wrap, MaxLines = 2,
                            TextTrimming = TextTrimming.CharacterEllipsis)
     let fitLabel = TextBlock(Margin = Thickness(14.0, 5.0), VerticalAlignment = VerticalAlignment.Center,
-                             FontFamily = FontFamily "Consolas,Menlo,monospace", FontSize = 12.0,
+                             FontFamily = Ui.mono, FontSize = 12.0,
                              TextWrapping = TextWrapping.NoWrap,
                              Foreground = SolidColorBrush(Color.FromRgb(0xFFuy, 0xC0uy, 0x60uy)))
 
@@ -37,8 +49,7 @@ type MainWindow() as this =
     let captions =
         [| Right; Top; Back; Free |]
         |> Array.map (fun kind ->
-            let t = TextBlock(FontSize = 11.0, FontFamily = FontFamily "Consolas,Menlo,monospace",
-                              Foreground = SolidColorBrush(Color.FromRgb(0x9Auy, 0xA4uy, 0xB0uy)),
+            let t = TextBlock(FontSize = 11.0, FontFamily = Ui.mono, Foreground = Ui.dimText,
                               IsHitTestVisible = false)
             captionCanvas.Children.Add t
             kind, t)
@@ -97,7 +108,7 @@ type MainWindow() as this =
     let refreshFlattenBar () =
         (match state.AxisSnapCandidate with
          | Some(ax, _) ->
-             cbSnap.Content <- $"""snap to true {"XYZ"[ax]} plane"""
+             cbSnap.Content <- $"snap to true {Ui.axisName ax} plane"
              cbSnap.IsVisible <- true
          | None -> cbSnap.IsVisible <- false)
         let current =
@@ -165,7 +176,7 @@ type MainWindow() as this =
             state.ApplyRotation(Mat3.rotDegrees axis deg)
             view.FrameCamera()
             refresh ()
-            setStatus $"""Rotated %g{deg}° about {"XYZ"[axis]}."""
+            setStatus $"Rotated %g{deg}° about {Ui.axisName axis}."
 
     let doSquare () =
         match state.ApplySquare() with
@@ -207,7 +218,7 @@ type MainWindow() as this =
         let snap =
             match pv.SnapOffAngleDegrees, state.AxisSnapCandidate with
             | Some off, Some(ax, _) ->
-                $""" · snapped to the true {"XYZ"[ax]} plane (free fit was %.2f{off}° off)"""
+                $" · snapped to the true {Ui.axisName ax} plane (free fit was %.2f{off}° off)"
             | _ -> ""
         $"Preview: would flatten %d{pv.MovedVertexCount} verts across %d{pv.Islands} island(s) · RMS %.3f{pv.RmsBeforeMm} → %.3f{pv.RmsAfterMm} mm · max move %.3f{pv.MaxMoveMm} mm{enc}{snap}. Tweak floor/ceiling and APPLY when it looks right."
 
@@ -330,8 +341,7 @@ type MainWindow() as this =
         toolbar.Children.Add(button "Y 90°" "Rotate 90° about Y" (doRotate 1 90.0))
         toolbar.Children.Add(button "Z 90°" "Rotate 90° about Z" (doRotate 2 90.0))
         toolbar.Children.Add(button "Flip" "Turn end for end (180° about Z)" (doRotate 2 180.0))
-        toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
-                                    Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
+        toolbar.Children.Add(Ui.separator ())
         btSquare <- button "Orient Face to Side"
                         "Turn the picked face square to Y — needs 3+ points on one flat SIDE face"
                         doSquare
@@ -348,8 +358,7 @@ type MainWindow() as this =
         toolbar.Children.Add btCenterline
         toolbar.Children.Add(button "Clear picks" "Drop every picked point" doClearPicks)
         toolbar.Children.Add(button "Undo" "Step back one change: a rotation, Y-Centerline or applied flatten" doUndo)
-        toolbar.Children.Add(Border(Width = 1.0, Margin = Thickness(4.0, 2.0, 10.0, 2.0),
-                                    Background = SolidColorBrush(Color.FromRgb(0x3Auy, 0x3Cuy, 0x42uy))))
+        toolbar.Children.Add(Ui.separator ())
         toolbar.Children.Add(button "Export STL"
                                     ("Write <name>_oriented.stl (orientation only, never flattened) and, when flattens "
                                      + "are applied, <name>_cleaned.stl (with them) beside the source")
@@ -359,7 +368,7 @@ type MainWindow() as this =
         let label (text : string) =
             TextBlock(Text = text, VerticalAlignment = VerticalAlignment.Center,
                       FontSize = 12.0, Margin = Thickness(0.0, 0.0, 2.0, 0.0),
-                      Foreground = SolidColorBrush(Color.FromRgb(0x9Auy, 0xA4uy, 0xB0uy)))
+                      Foreground = Ui.dimText)
         btFlatten <- button "Flatten Face"
                         ("Flood-fill the flat under your picks and PREVIEW the snap: captured faces green, "
                          + "surrounded-but-not-captured pockets yellow. Nothing moves until APPLY.")

@@ -169,40 +169,31 @@ let disposeBuffer (gl : GL) (b : GpuBuffer) =
         gl.DeleteBuffer b.Vbo
         gl.DeleteVertexArray b.Vao
 
-/// Flat-shaded triangle soup for the whole mesh, in MODEL space.
+/// Flat-shaded vertices, in MODEL space, for `count` of the mesh's faces:
+/// the i-th output triangle is face `faceAt i`.
+let private flatShaded (m : Mesh) (count : int) (faceAt : int -> int) : LitVertex[] =
+    let out = Array.zeroCreate<LitVertex> (count * 3)
+    System.Threading.Tasks.Parallel.For(0, count, fun i ->
+        let t = faceAt i
+        let struct (a, b, c) = Mesh.triangle m t
+        let nv = Float32.ofVec3 (Mesh.faceNormal m t)
+        out[i * 3] <- LitVertex(Float32.ofVec3 a, nv)
+        out[i * 3 + 1] <- LitVertex(Float32.ofVec3 b, nv)
+        out[i * 3 + 2] <- LitVertex(Float32.ofVec3 c, nv)) |> ignore
+    out
+
+/// Flat-shaded triangle soup for the whole mesh.
 ///
 /// Uploaded once per file load and never again: re-orienting the scan changes
 /// a uniform matrix, not 50 MB of vertex data. That is what keeps the rotate
 /// buttons instant on a 760k-triangle scan.
-let meshVertices (m : Mesh) : LitVertex[] =
-    let n = m.TriangleCount
-    let out = Array.zeroCreate<LitVertex> (n * 3)
-    System.Threading.Tasks.Parallel.For(0, n, fun t ->
-        let struct (a, b, c) = Mesh.triangle m t
-        let nr = Mesh.faceNormal m t
-        let v3 (p : Vec3) = Vector3(float32 p.X, float32 p.Y, float32 p.Z)
-        let nv = v3 nr
-        out[t * 3] <- LitVertex(v3 a, nv)
-        out[t * 3 + 1] <- LitVertex(v3 b, nv)
-        out[t * 3 + 2] <- LitVertex(v3 c, nv)) |> ignore
-    out
+let meshVertices (m : Mesh) = flatShaded m m.TriangleCount id
 
 /// Flat-shaded vertices for a SUBSET of a mesh's faces — the flatten
 /// preview's highlight geometry. Region-sized, so rebuilding it on every
 /// parameter tweak costs milliseconds where re-uploading the whole scan
 /// would not.
-let subsetVertices (m : Mesh) (faces : int[]) : LitVertex[] =
-    let out = Array.zeroCreate<LitVertex> (faces.Length * 3)
-    System.Threading.Tasks.Parallel.For(0, faces.Length, fun i ->
-        let t = faces[i]
-        let struct (a, b, c) = Mesh.triangle m t
-        let nr = Mesh.faceNormal m t
-        let v3 (p : Vec3) = Vector3(float32 p.X, float32 p.Y, float32 p.Z)
-        let nv = v3 nr
-        out[i * 3] <- LitVertex(v3 a, nv)
-        out[i * 3 + 1] <- LitVertex(v3 b, nv)
-        out[i * 3 + 2] <- LitVertex(v3 c, nv)) |> ignore
-    out
+let subsetVertices (m : Mesh) (faces : int[]) = flatShaded m faces.Length (fun i -> faces[i])
 
 /// A unit-radius UV sphere for pick markers. Coarse on purpose — it is a 12
 /// pixel dot on screen and nobody is inspecting its silhouette.

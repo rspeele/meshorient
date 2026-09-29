@@ -76,8 +76,6 @@ let private orthoBasis (kind : ViewKind) =
     | Back -> Vector3(-1.0f, 0.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
     | Free -> Vector3(0.0f, -1.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)
 
-let private toV3 (v : Vec3) = Vector3(float32 v.X, float32 v.Y, float32 v.Z)
-
 /// View and projection for a fixed orthographic panel, framed so the whole
 /// model fits with a small margin whatever its current orientation.
 ///
@@ -86,13 +84,13 @@ let private toV3 (v : Vec3) = Vector3(float32 v.X, float32 v.Y, float32 v.Z)
 /// changing.
 let orthoMatrices (kind : ViewKind) (bounds : Bounds) (aspect : float32) =
     let dir, up = orthoBasis kind
-    let centre = toV3 (Bounds.centre bounds)
+    let centre = Float32.ofVec3 (Bounds.centre bounds)
     let diag = max 1e-3f (float32 (Bounds.diagonal bounds))
     let eye = centre + dir * (diag * 2.0f)
     let view = Matrix4x4.CreateLookAt(eye, centre, up)
 
     // Project the eight bbox corners into view space and fit the box to them.
-    let lo, hi = toV3 bounds.Min, toV3 bounds.Max
+    let lo, hi = Float32.ofVec3 bounds.Min, Float32.ofVec3 bounds.Max
     let mutable minX, maxX = Single.MaxValue, Single.MinValue
     let mutable minY, maxY = Single.MaxValue, Single.MinValue
     for i in 0 .. 7 do
@@ -138,7 +136,7 @@ let defaultOrbit =
 let frameOrbit (bounds : Bounds) (orbit : Orbit) =
     let diag = max 1.0f (float32 (Bounds.diagonal bounds))
     { orbit with
-        Target = toV3 (Bounds.centre bounds)
+        Target = Float32.ofVec3 (Bounds.centre bounds)
         Distance = diag * 0.75f / MathF.Tan(orbit.FovY * 0.5f) }
 
 let eyePosition (c : Orbit) =
@@ -205,5 +203,4 @@ let cursorRay (view : Matrix4x4) (proj : Matrix4x4) (ndc : Vector2) =
     let near = unproject 0.0f
     let far = unproject 1.0f
     let dir = Vector3.Normalize(far - near)
-    {   Raycast.Origin = { X = float near.X; Y = float near.Y; Z = float near.Z }
-        Raycast.Direction = { X = float dir.X; Y = float dir.Y; Z = float dir.Z } }
+    { Raycast.Origin = Float32.toVec3 near; Raycast.Direction = Float32.toVec3 dir }

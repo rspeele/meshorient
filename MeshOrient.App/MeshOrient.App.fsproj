@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Float32.fs" />
     <Compile Include="Camera.fs" />
     <Compile Include="ParamStep.fs" />
     <Compile Include="Scene.fs" />

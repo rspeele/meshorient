@@ -192,15 +192,19 @@ type FlattenTests () =
         s.Load stl |> ignore
         s, stl
 
+    /// Pick the wall's plate at fixture (model) coordinates (x, z), by ray,
+    /// exactly as a click would arrive. The coordinates go through the
+    /// state's current transform, so this works whatever orientation the
+    /// model is in.
+    let pickPlateAt (s : MeshOrient.App.OrientState) (x : float) (z : float) =
+        let w = Mat3.apply s.Rotation (Vec3.create x 0.0 z) + s.Offset
+        let hit = s.PickAt { Raycast.Origin = Vec3.create w.X 1000.0 w.Z
+                             Raycast.Direction = Vec3.create 0.0 -1.0 0.0 }
+        Assert.IsTrue(hit.IsSome, $"pick at ({x}, {z}) should land")
+
     /// Three picks on the wall's plate, clear of the boss, rib and window.
-    /// Fixture (model) coordinates go through the state's current transform,
-    /// so this works whatever orientation the model is in.
     let pickPlate (s : MeshOrient.App.OrientState) =
-        for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
-            let w = Mat3.apply s.Rotation (Vec3.create x 0.0 z) + s.Offset
-            let hit = s.PickAt { Raycast.Origin = Vec3.create w.X 1000.0 w.Z
-                                 Raycast.Direction = Vec3.create 0.0 -1.0 0.0 }
-            Assert.IsTrue(hit.IsSome, $"pick at ({x}, {z}) should land")
+        for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do pickPlateAt s x z
 
     // ------------------------------------------------------------ adjacency
 
@@ -601,19 +605,9 @@ type FlattenTests () =
     /// same road a real scan takes (indexed -> STL soup -> weld).
     [<TestMethod>]
     member _.Preview_apply_undo_round_trip_through_the_app_state () =
-        let stl = Path.Combine(Path.GetTempPath(), $"meshorient_wall_{Guid.NewGuid():N}.stl")
-        MeshIO.saveStlBinary stl (FlattenFixtures.wall sigma)
+        let s, stl = wallState ()
         try
-            let s = MeshOrient.App.OrientState()
-            s.Load stl |> ignore
-            // Picks by ray, exactly as clicks would arrive. Fixture
-            // coordinates go through the state's own offset to become world
-            // rays (it is zero on load, and rotation is identity).
-            for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
-                let o = s.Offset
-                let hit = s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
-                                     Raycast.Direction = Vec3.create 0.0 -1.0 0.0 }
-                Assert.IsTrue(hit.IsSome, $"pick at ({x}, {z}) should land")
+            pickPlate s
             Assert.IsTrue s.CanFlatten
             let floor = s.SuggestedFloor.Value
             printfn "suggested floor from picks: %.4f mm" floor
@@ -637,8 +631,7 @@ type FlattenTests () =
 
             // A new pick stales the preview — what is highlighted must always
             // be what APPLY would do.
-            s.PickAt { Raycast.Origin = Vec3.create (40.0 + s.Offset.X) 1000.0 (10.0 + s.Offset.Z)
-                       Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
+            pickPlateAt s 40.0 10.0
             Assert.IsFalse(s.PreviewIsCurrent(floor, 0.3, false, false), "pick edits must stale the preview")
             s.ComputeFlattenPreview(floor, 0.3, false, false) |> ignore
 
@@ -672,16 +665,10 @@ type FlattenTests () =
     /// cleanup is never the price of the raw geometry.
     [<TestMethod>]
     member _.Export_writes_pristine_oriented_and_flattened_cleaned () =
-        let stl = Path.Combine(Path.GetTempPath(), $"meshorient_exp_{Guid.NewGuid():N}.stl")
-        MeshIO.saveStlBinary stl (FlattenFixtures.wall sigma)
+        let s, stl = wallState ()
         let mutable toDelete = [ stl ]
         try
-            let s = MeshOrient.App.OrientState()
-            s.Load stl |> ignore
-            for (x, z) in [ 5.0, 5.0; 55.0, 10.0; 5.0, 75.0 ] do
-                let o = s.Offset
-                s.PickAt { Raycast.Origin = Vec3.create (x + o.X) 1000.0 (z + o.Z)
-                           Raycast.Direction = Vec3.create 0.0 -1.0 0.0 } |> ignore
+            pickPlate s
             s.ComputeFlattenPreview(3.0 * sigma, 0.3, false, false) |> ignore
             match s.ApplyFlatten() with
             | Error e -> Assert.Fail e
