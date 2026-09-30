@@ -55,7 +55,7 @@ let intersect (mesh : Mesh) (ray : Ray) : Hit option =
                     bt <- d
                     bi <- t
             struct (bt, bi))
-        |> Array.fold (fun (struct (bt, bi) as acc) (struct (t, i)) ->
+        |> Array.fold (fun (struct (bt, _) as acc) (struct (t, i)) ->
             if i >= 0 && t < bt then struct (t, i) else acc) (struct (infinity, -1))
     if tri < 0 then None
     else

@@ -114,17 +114,3 @@ module Mesh =
     /// that weight by area get the right answer for free, and the renderer
     /// draws a degenerate triangle as nothing anyway.
     let faceNormal (m : Mesh) (t : int) = Vec3.normalize (crossArea m t)
-
-    /// Median edge length — a robust read on how finely the scan is
-    /// tessellated.
-    let medianEdgeLength (m : Mesh) =
-        if m.TriangleCount = 0 then 0.0
-        else
-            // One edge per triangle is a fair enough sample, and a third of
-            // the sort that measuring all three would cost.
-            let lengths =
-                Array.init m.TriangleCount (fun t ->
-                    let struct (a, b, _) = triangle m t
-                    Vec3.length (b - a))
-            System.Array.Sort lengths
-            lengths[lengths.Length / 2]

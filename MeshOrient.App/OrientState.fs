@@ -225,11 +225,6 @@ type OrientState() =
             setRotation (Geometry.autoOrient m)
             recentre ()
 
-    member _.Recentre() =
-        if mesh.IsSome then
-            pushRigid ()
-            recentre ()
-
     // -------------------------------------------------------------- picks
 
     /// Where a world-space ray meets the mesh, in MODEL space.

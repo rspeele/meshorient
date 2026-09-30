@@ -105,21 +105,6 @@ type SquareTests () =
         Assert.IsTrue(Fixtures.degreesBetween longAxis Vec3.unitX < 0.2,
                       $"squaring should not have rotated the long axis, got {longAxis}")
 
-    [<TestMethod>]
-    member _.Tilt_components_split_into_the_two_visible_leans () =
-        // A tilt about X leans the model in the back view, one about Z leans
-        // it in the top.
-        let tilted =
-            Mesh.transform (Mat3.mul (Mat3.rotDegrees 0 1.2) (Mat3.rotDegrees 2 -0.6))
-                           Vec3.zero Fixtures.synthetic.Value
-        let picks =
-            Fixtures.flatRightWallProbes
-            |> Array.map (fun (x, z) -> Fixtures.rightFaceAt tilted x z)
-        let aboutX, aboutZ = Orient.tiltComponents picks
-        printfn "tilt components: about X %.3f deg, about Z %.3f deg" aboutX aboutZ
-        Assert.AreEqual(1.2, aboutX, 0.1, "lean visible in the back view")
-        Assert.AreEqual(0.6, abs aboutZ, 0.1, "lean visible in the top view")
-
 
 [<TestClass>]
 type CenterlineTests () =

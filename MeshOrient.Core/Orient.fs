@@ -20,12 +20,6 @@
 /// are the same instruction.
 module MeshOrient.Core.Orient
 
-/// The offset that puts the bounding-box centre at the origin, as a
-/// translation rather than a new array.
-let recentreOffset (m : Mesh) : Vec3 =
-    let b = Mesh.bounds m
-    if b.IsEmpty then Vec3.zero else -(Bounds.centre b)
-
 // ------------------------------------------------------------ stage 2: square
 
 type SquareResult =
@@ -58,14 +52,6 @@ let squareToAxis (axis : int) (picks : Vec3[]) : SquareResult =
         { Rotation = Mat3.aboutAxis v angle
           TiltDegrees = Angle.toDegrees angle
           RmsMm = fit.Rms }
-
-/// The two visible components of a tilt, in degrees: rotation about X leans
-/// the model in the back (Y-Z) view, rotation about Z leans it in the top
-/// (X-Y) view. Only meaningful for a Y-axis square.
-let tiltComponents (picks : Vec3[]) : float * float =
-    let fit = Geometry.fitPlane picks
-    let n = if fit.Normal.Y < 0.0 then -fit.Normal else fit.Normal
-    Angle.toDegrees (atan2 n.Z n.Y), Angle.toDegrees (atan2 n.X n.Y)
 
 // -------------------------------------------------------- stage 3: straighten
 

@@ -148,8 +148,6 @@ type GlView(state : OrientState) as this =
     /// panel.
     member this.Panels = panelLayout this.Bounds.Width this.Bounds.Height
 
-    member _.Orbit with get () = orbit and set v = orbit <- v
-
     /// Point the 3D camera at whatever is loaded now.
     member _.FrameCamera() = orbit <- frameOrbit state.Bounds orbit
 

@@ -101,13 +101,6 @@ module Mat3 =
     /// Build from three rows.
     let ofRows r0 r1 r2 = { R0 = r0; R1 = r1; R2 = r2 }
 
-    /// Build from three columns — the natural way to assemble a rotation from
-    /// a set of basis vectors you want mapped ONTO the world axes.
-    let ofCols (c0 : Vec3) (c1 : Vec3) (c2 : Vec3) =
-        {   R0 = { X = c0.X; Y = c1.X; Z = c2.X }
-            R1 = { X = c0.Y; Y = c1.Y; Z = c2.Y }
-            R2 = { X = c0.Z; Y = c1.Z; Z = c2.Z } }
-
     let inline apply (m : Mat3) (v : Vec3) =
         {   X = Vec3.dot m.R0 v
             Y = Vec3.dot m.R1 v

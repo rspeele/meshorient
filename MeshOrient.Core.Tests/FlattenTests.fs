@@ -360,7 +360,7 @@ type FlattenTests () =
             Assert.IsTrue(m.Vertices[idx].Y < 1.0,
                           $"a raised-feature vert moved (idx {idx}, y {m.Vertices[idx].Y})")
         let mutable flangeMoved = 0
-        for (idx, old) in undo do
+        for (idx, _) in undo do
             if m.Vertices[idx].X > 59.9 && m.Vertices[idx].Y > 0.5 then flangeMoved <- flangeMoved + 1
         Assert.AreEqual(0, flangeMoved, "the flange is not part of the flat")
         Assert.IsTrue(flat.Vertices.Length = m.Vertices.Length)
