@@ -5,6 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>meshorient</AssemblyName>
     <RootNamespace>MeshOrient.App</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

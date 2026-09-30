@@ -78,7 +78,7 @@ type MainWindow() as this =
     // that recomputes per pixel of travel is exactly the misfeature this
     // layout exists to avoid.
     let tbFloor = TextBox(Width = 64.0, Margin = Thickness(4.0, 0.0, 10.0, 0.0),
-                          FontSize = 12.0, Watermark = "auto")
+                          FontSize = 12.0, PlaceholderText = "auto")
     let tbCeiling = TextBox(Width = 64.0, Text = "0.3",
                             Margin = Thickness(4.0, 0.0, 10.0, 0.0), FontSize = 12.0)
     let cbForce = CheckBox(Content = "force-flatten enclaves", FontSize = 12.0,
