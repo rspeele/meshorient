@@ -34,7 +34,16 @@ module private Cube =
             sb.AppendLine $"f %d{a + 1}//1 %d{b + 1}//1 %d{c + 1}//1" |> ignore
         sb.ToString()
 
-    let plyAscii () =
+    /// Per-corner texture coordinates for the busy-face PLY variants: in
+    /// [0, 1], so a reader that took them for corner indices would build
+    /// triangles out of vertices 0 and 1.
+    let texcoords = [| 0.1; 0.9; 0.4; 0.6; 0.8; 0.2 |]
+
+    /// With `busyFaces`, each face carries a `flags` byte BEFORE its corner
+    /// list and a `texcoord` float list AFTER it — the layout photogrammetry
+    /// exporters write — and an `edge` element follows the faces. Only
+    /// `vertex_indices` may be read as corners.
+    let plyAscii (busyFaces : bool) =
         let sb = StringBuilder()
         sb.AppendLine "ply" |> ignore
         sb.AppendLine "format ascii 1.0" |> ignore
@@ -43,27 +52,40 @@ module private Cube =
         sb.AppendLine "property float y" |> ignore
         sb.AppendLine "property float z" |> ignore
         sb.AppendLine $"element face %d{tris.Length}" |> ignore
+        if busyFaces then sb.AppendLine "property uchar flags" |> ignore
         sb.AppendLine "property list uchar int vertex_indices" |> ignore
+        if busyFaces then
+            sb.AppendLine "property list uchar float texcoord" |> ignore
+            sb.AppendLine "element edge 1" |> ignore
+            sb.AppendLine "property int vertex1" |> ignore
+            sb.AppendLine "property int vertex2" |> ignore
         sb.AppendLine "end_header" |> ignore
         for (x, y, z) in corners do
             sb.AppendLine $"%g{x} %g{y} %g{z}" |> ignore
+        let uv = texcoords |> Array.map (sprintf "%g") |> String.concat " "
         for (a, b, c) in tris do
-            sb.AppendLine $"3 %d{a} %d{b} %d{c}" |> ignore
+            if busyFaces then sb.AppendLine $"1 3 %d{a} %d{b} %d{c} 6 {uv}" |> ignore
+            else sb.AppendLine $"3 %d{a} %d{b} %d{c}" |> ignore
+        if busyFaces then sb.AppendLine "0 6" |> ignore
         sb.ToString()
 
     /// Binary little-endian, with a `confidence` property after z so the
     /// reader has to honour the declared layout rather than assume x/y/z are
-    /// the only three floats in the record.
-    let plyBinaryLe () =
+    /// the only three floats in the record. `busyFaces` as for `plyAscii`.
+    let plyBinaryLe (busyFaces : bool) =
         let header =
             String.concat "\n"
-                [   "ply"; "format binary_little_endian 1.0"
-                    $"element vertex %d{corners.Length}"
-                    "property float x"; "property float y"; "property float z"
-                    "property float confidence"
-                    $"element face %d{tris.Length}"
-                    "property list uchar int vertex_indices"
-                    "end_header"; "" ]
+                [   yield "ply"; yield "format binary_little_endian 1.0"
+                    yield $"element vertex %d{corners.Length}"
+                    yield! [ "property float x"; "property float y"; "property float z" ]
+                    yield "property float confidence"
+                    yield $"element face %d{tris.Length}"
+                    if busyFaces then yield "property uchar flags"
+                    yield "property list uchar int vertex_indices"
+                    if busyFaces then
+                        yield! [ "property list uchar float texcoord"
+                                 "element edge 1"; "property int vertex1"; "property int vertex2" ]
+                    yield "end_header"; yield "" ]
         use ms = new MemoryStream()
         let bytes = Encoding.ASCII.GetBytes header
         ms.Write(bytes, 0, bytes.Length)
@@ -78,8 +100,14 @@ module private Cube =
         for (x, y, z) in corners do
             f32 x; f32 y; f32 z; f32 1.0
         for (a, b, c) in tris do
+            if busyFaces then ms.WriteByte 1uy
             ms.WriteByte 3uy
             i32 a; i32 b; i32 c
+            if busyFaces then
+                ms.WriteByte(byte texcoords.Length)
+                for uv in texcoords do f32 uv
+        if busyFaces then
+            i32 0; i32 6
         ms.ToArray()
 
     let stlAscii () =
@@ -133,13 +161,40 @@ type IoTests () =
 
     [<TestMethod>]
     member _.Reads_ascii_ply () =
-        withFile ".ply" (fun p -> File.WriteAllText(p, Cube.plyAscii ()))
+        withFile ".ply" (fun p -> File.WriteAllText(p, Cube.plyAscii false))
                         (fun p -> assertIsTheCube "ascii PLY" (MeshIO.load p))
 
     [<TestMethod>]
     member _.Reads_binary_ply_with_extra_property () =
-        withFile ".ply" (fun p -> File.WriteAllBytes(p, Cube.plyBinaryLe ()))
+        withFile ".ply" (fun p -> File.WriteAllBytes(p, Cube.plyBinaryLe false))
                         (fun p -> assertIsTheCube "binary PLY" (MeshIO.load p))
+
+    /// Faces with a flags byte before the corner list, a texcoord list after
+    /// it, and an edge element after the faces. Every triangle must come out
+    /// exactly as authored: reading the texcoord list as corners would add
+    /// a bogus triangle per face, and a positional reader would take the
+    /// flags byte for the corner count.
+    [<TestMethod>]
+    member _.Ply_faces_read_only_the_vertex_indices_list () =
+        let check (label : string) (m : Mesh) =
+            assertIsTheCube label m
+            for t in 0 .. Cube.tris.Length - 1 do
+                let (a, b, c) = Cube.tris[t]
+                let struct (pa, pb, pc) = Mesh.triangle m t
+                for (i, p) in [ a, pa; b, pb; c, pc ] do
+                    let (x, y, z) = Cube.corners[i]
+                    Assert.AreEqual(Vec3.create x y z, p, $"{label}: a corner of triangle {t}")
+        withFile ".ply" (fun p -> File.WriteAllText(p, Cube.plyAscii true))
+                        (fun p -> check "ascii PLY" (MeshIO.load p))
+        withFile ".ply" (fun p -> File.WriteAllBytes(p, Cube.plyBinaryLe true))
+                        (fun p -> check "binary PLY" (MeshIO.load p))
+
+    [<TestMethod>]
+    member _.Ply_face_without_vertex_indices_is_an_error () =
+        let text = (Cube.plyAscii false).Replace("vertex_indices", "corners")
+        withFile ".ply" (fun p -> File.WriteAllText(p, text)) (fun p ->
+            let message = try MeshIO.load p |> ignore; "" with e -> e.Message
+            Assert.IsTrue(message.Contains "vertex_indices", $"should name the missing list, got '{message}'"))
 
     /// A binary STL whose 80-byte header starts with "solid" — a real thing
     /// plenty of exporters emit. Sniffing the prefix instead of checking the

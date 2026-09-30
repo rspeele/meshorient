@@ -153,6 +153,11 @@ let private readPlyScalar (bytes : byte[]) (off : int) (ty : PlyScalar) (bigEndi
         | F32 -> float (BinaryPrimitives.ReadSingleLittleEndian span)
         | F64 -> BinaryPrimitives.ReadDoubleLittleEndian span
 
+/// The face property that holds the corner indices. `vertex_indices` is the
+/// spec's name; some writers use `vertex_index`. Anything else on a face —
+/// flags, a `texcoord` list — is stepped over, never read as corners.
+let private isCornerList (name : string) = name = "vertex_indices" || name = "vertex_index"
+
 let private loadPly (path : string) =
     let bytes = File.ReadAllBytes path
 
@@ -184,6 +189,18 @@ let private loadPly (path : string) =
             | "end_header" -> go <- false
             | _ -> ()
 
+    // Checked up front so both encodings reject the same files the same way.
+    for name, _, props in elements do
+        let has pred = props |> Seq.exists pred
+        if name = "vertex" then
+            if has (function List _ -> true | _ -> false) then
+                failwith "PLY vertex elements with list properties are not supported"
+            for axis in [ "x"; "y"; "z" ] do
+                if not (has (function Scalar(n, _) -> n = axis | _ -> false)) then
+                    failwithf "PLY vertex element has no '%s' property" axis
+        elif name = "face" && not (has (function List(n, _, _) -> isCornerList n | _ -> false)) then
+            failwith "PLY face element has no vertex_indices list"
+
     let verts = ResizeArray<Vec3>()
     let idx = ResizeArray<int>()
 
@@ -191,6 +208,7 @@ let private loadPly (path : string) =
     | "ascii" ->
         for name, count, props in elements do
             let names = props |> Seq.map (function Scalar(n, _) -> n | List(n, _, _) -> n) |> Seq.toArray
+            // Vertex records are all scalars, so field i is property i.
             let ix = Array.IndexOf(names, "x")
             let iy = Array.IndexOf(names, "y")
             let iz = Array.IndexOf(names, "z")
@@ -199,14 +217,21 @@ let private loadPly (path : string) =
                 if name = "vertex" then
                     verts.Add { X = parseFloat f[ix]; Y = parseFloat f[iy]; Z = parseFloat f[iz] }
                 elif name = "face" then
-                    let n = parseInt f[0]
-                    addFan idx (Array.init n (fun k -> parseInt f[k + 1]))
+                    // A scalar is one field; a list is its count, then that
+                    // many items.
+                    let mutable i = 0
+                    for p in props do
+                        match p with
+                        | Scalar _ -> i <- i + 1
+                        | List(n, _, _) ->
+                            let len = parseInt f[i]
+                            if isCornerList n then
+                                addFan idx (Array.init len (fun k -> parseInt f[i + 1 + k]))
+                            i <- i + 1 + len
     | "binary_little_endian" | "binary_big_endian" ->
         let big = format = "binary_big_endian"
         for name, count, props in elements do
             if name = "vertex" then
-                if props |> Seq.exists (function List _ -> true | _ -> false) then
-                    failwith "PLY vertex elements with list properties are not supported"
                 // Precompute each property's offset within one fixed-size record.
                 let mutable stride = 0
                 let offsets = ResizeArray<string * int * PlyScalar>()
@@ -215,9 +240,8 @@ let private loadPly (path : string) =
                     | Scalar(n, t) -> offsets.Add(n, stride, t); stride <- stride + t.Size
                     | List _ -> ()
                 let find n =
-                    match offsets |> Seq.tryFind (fun (nm, _, _) -> nm = n) with
-                    | Some(_, o, t) -> o, t
-                    | None -> failwithf "PLY vertex element has no '%s' property" n
+                    let _, o, t = offsets |> Seq.find (fun (nm, _, _) -> nm = n)
+                    o, t
                 let ox, tx = find "x"
                 let oy, ty = find "y"
                 let oz, tz = find "z"
@@ -227,20 +251,21 @@ let private loadPly (path : string) =
                                 Z = readPlyScalar bytes (pos + oz) tz big }
                     pos <- pos + stride
             else
-                // Walk every other element record by record: face lists are
-                // read, anything else (edge, material...) is stepped over.
+                // Walk every other element record by record: a face's corner
+                // list is read, everything else (other face properties, edge
+                // and material elements...) is stepped over.
                 let isFace = name = "face"
                 for _ in 1 .. count do
                     for p in props do
                         match p with
                         | Scalar(_, t) -> pos <- pos + t.Size
-                        | List(_, ct, it) ->
-                            let n = int (readPlyScalar bytes pos ct big)
+                        | List(n, ct, it) ->
+                            let len = int (readPlyScalar bytes pos ct big)
                             pos <- pos + ct.Size
-                            if isFace then
-                                addFan idx (Array.init n (fun k ->
+                            if isFace && isCornerList n then
+                                addFan idx (Array.init len (fun k ->
                                     int (readPlyScalar bytes (pos + k * it.Size) it big)))
-                            pos <- pos + n * it.Size
+                            pos <- pos + len * it.Size
     | f -> failwithf "Unsupported PLY format '%s'" f
 
     Mesh.create (verts.ToArray()) (idx.ToArray()) path
